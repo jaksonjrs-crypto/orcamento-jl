@@ -26,7 +26,7 @@
       const tc = await pg.getTextContent();
       paginas.push({
         largura: vp.width,
-        itens: tc.items.filter(i => i.str && i.str.trim()).map(i => ({ s: i.str.trim(), x: i.transform[4], y: vp.height - i.transform[5] }))
+        itens: tc.items.filter(i => i.str && i.str.trim()).map(i => ({ s: i.str.trim(), x: i.transform[4], y: vp.height - i.transform[5], w: i.width || 0 }))
       });
     }
     try { await task.destroy(); } catch (e) { /* ok */ }
@@ -41,7 +41,12 @@
       const l = out[out.length - 1];
       if (l && Math.abs(it.y - l.y) <= 2.2) l.itens.push(it); else out.push({ y: it.y, itens: [it] });
     }
-    return out.map(l => l.itens.sort((a, b) => a.x - b.x).map(i => i.s).join(" ").replace(/\s+/g, " ").trim());
+    // pedaços colados (sem espaço visível entre eles) se juntam sem espaço: "P" + "ARCELADO" = "PARCELADO"
+    return out.map(l => {
+      const its = l.itens.sort((a, b) => a.x - b.x); let txt = ""; let fim = null;
+      for (const i of its) { txt += (fim === null ? "" : (i.w && i.x - fim < 0.6 ? "" : " ")) + i.s; fim = i.w ? i.x + i.w : null; }
+      return txt.replace(/\s+/g, " ").trim();
+    });
   }
 
   // páginas -> linhas em ordem de leitura (coluna esquerda e depois direita)
@@ -127,6 +132,52 @@
     return { banco: "Santander", final: primeiro, venc, itens, esperado: Math.round((brasil + exterior - creditos) * 100) / 100, totalFatura, saldoAnterior };
   }
 
+  // ---------- Inter ----------
+  const MES_ABREV = { jan: 1, fev: 2, mar: 3, abr: 4, mai: 5, jun: 6, jul: 7, ago: 8, set: 9, out: 10, nov: 11, dez: 12 };
+  function lerInter(paginas) {
+    const txt = textoCorrido(paginas);
+    const venc = (txt.match(/Data de Vencimento[\s\S]{0,60}?(\d{2}\/\d{2}\/\d{4})/) || txt.match(/VENCIMENTO[\s\S]{0,120}?(\d{2}\/\d{2}\/\d{4})/) || [])[1];
+    const esperado = num((txt.match(/Despesas do m[êe]s\s+R\$\s*([\d.]+,\d{2})/) || [])[1] || "NaN");
+    const totalFatura = num((txt.match(/Total da sua fatura\s+R\$\s*([\d.]+,\d{2})/) || [])[1] || "0");
+    const itens = []; let secao = false; let cartao = ""; let primeiro = "";
+    for (const l of linhasEmOrdem(paginas, 1)) {
+      if (/Despesas da fatura/.test(l)) { secao = true; continue; }
+      if (/Pr[óo]xima fatura|Fale com a gente|Encargos financeiros/.test(l)) { secao = false; continue; }
+      if (!secao) continue;
+      const cm = l.match(/^CART[ÃA]O\s+\d{4}\*{4}(\d{4})/); if (cm) { cartao = cm[1]; if (!primeiro) primeiro = cartao; continue; }
+      const m = l.match(/^(\d{1,2}) de ([a-zç]{3})\.? (\d{4}) (.+?) (\+ )?R\$ ?([\d.]+,\d{2})$/i);
+      if (!m) continue;
+      let desc = m[4]; let parcela = "";
+      const pm = desc.match(/^(.*?)\s*\(Parcela (\d+) de (\d+)\)/i);
+      if (pm) { desc = pm[1]; parcela = pad(pm[2]) + "/" + pad(pm[3]); } else desc = desc.replace(/\s+-$/, "");
+      if (m[5] || /PAGTO|PAGAMENTO/i.test(desc)) continue;   // pagamento da fatura anterior
+      const mes = MES_ABREV[m[2].toLowerCase()]; if (!mes) continue;
+      itens.push({ data: pad(m[1]) + "/" + pad(mes), ano: Number(m[3]), desc: desc.trim(), parcela, valor: num(m[6]), dica: "", cidade: "", titular: "", cartao });
+    }
+    return { banco: "Inter", final: primeiro, venc, itens, esperado, totalFatura, saldoAnterior: 0 };
+  }
+
+  // ---------- contas de consumo (um lançamento só) ----------
+  function lerCemig(paginas) {
+    const txt = textoCorrido(paginas);
+    const m = txt.match(/([A-Z]{3}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.]+,\d{2})/);
+    if (!m) throw new Error("Não encontrei referência, vencimento e valor na conta da Cemig.");
+    const kwh = (txt.match(/Energia kWh\s+\S+\s+[\d.]+\s+[\d.]+\s+\d+\s+([\d.]+)/) || [])[1];
+    const inj = (txt.match(/Energia Injetada\s+\S+\s+[\d.]+\s+[\d.]+\s+\d+\s+([\d.]+)/) || [])[1];
+    const detalhe = [kwh ? kwh + " kWh consumidos" : "", inj ? inj + " kWh injetados (solar)" : ""].filter(Boolean).join(" · ");
+    const debito = /ATEN[ÇC][ÃA]O:?\s*D[ÉE]BITO AUTOM/i.test(txt);
+    return { tipo: "conta", empresa: "Cemig", grupo: "Habitação", item: "Conta de energia", ref: m[1], venc: m[2], valor: num(m[3]), detalhe, debito };
+  }
+  function lerCopasa(paginas) {
+    const txt = textoCorrido(paginas);
+    // o canhoto de pagamento traz "referência  vencimento  valor" (no topo, a data ao lado é a de emissão)
+    const todas = [...txt.matchAll(/([A-Z]{3}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+R\$\s*([\d.]+,\d{2})/g)];
+    const m = todas[todas.length - 1];
+    if (!m) throw new Error("Não encontrei referência, vencimento e valor na conta da Copasa.");
+    const m3 = (txt.match(/(\d+)\s*m³/) || [])[1];
+    return { tipo: "conta", empresa: "Copasa", grupo: "Habitação", item: "Conta de água", ref: m[1], venc: m[2], valor: num(m[3]), detalhe: m3 ? m3 + " m³" : "" };
+  }
+
   // ---------- estornos: um crédito anula uma compra de mesmo valor ----------
   function marcarEstornos(itens) {
     for (const neg of itens.filter(i => i.valor < 0)) {
@@ -138,16 +189,20 @@
   function ler(paginas) {
     const txt = textoCorrido(paginas);
     let r;
-    if (/SANTANDER/i.test(txt) && /Detalhamento da Fatura/i.test(txt)) r = lerSantander(paginas);
+    if (/CEMIG/.test(txt) && /ENERGIA EL[ÉE]TRICA/i.test(txt)) r = lerCemig(paginas);
+    else if (/COMPANHIA DE SANEAMENTO DE MG|COPASA/i.test(txt)) r = lerCopasa(paginas);
+    else if (/SANTANDER/i.test(txt) && /Detalhamento da Fatura/i.test(txt)) r = lerSantander(paginas);
     else if (/Ita[úu]|ITAU UNIBANCO/i.test(txt) && /Lan[çc]amentos: compras e saques/.test(txt)) r = lerItau(paginas);
-    else throw new Error("Esse PDF não parece uma fatura Itaú ou Santander. Por enquanto o app lê só esses dois modelos.");
-    if (!r.venc) throw new Error("Não encontrei a data de vencimento na fatura.");
-    for (const it of r.itens) it.dataCompra = it.data ? dataCompleta(it.data, r.venc) : null;
+    else if (/BANCO INTER|bancointer|inter\.co/i.test(txt) && /Despesas da fatura/.test(txt)) r = lerInter(paginas);
+    else throw new Error("Ainda não sei ler esse modelo de PDF. Hoje o app lê faturas Itaú, Santander e Inter e contas da Cemig e da Copasa.");
+    if (!r.venc) throw new Error("Não encontrei a data de vencimento no PDF.");
+    { const [d, m, a] = r.venc.split("/"); r.vencISO = `${a}-${m}-${d}`; }
+    if (r.tipo === "conta") { r.chave = `${r.empresa} · ref. ${r.ref}`; return r; }
+    r.tipo = "cartao";
+    for (const it of r.itens) it.dataCompra = it.ano ? `${it.ano}-${it.data.slice(3)}-${it.data.slice(0, 2)}` : it.data ? dataCompleta(it.data, r.venc) : null;
     marcarEstornos(r.itens);
     r.soma = Math.round(r.itens.reduce((a, i) => a + i.valor, 0) * 100) / 100;
     r.confere = isFinite(r.esperado) && Math.abs(r.soma - r.esperado) < 0.01;
-    const [d, m, a] = r.venc.split("/");
-    r.vencISO = `${a}-${m}-${d}`;
     r.chave = `${r.banco} final ${r.final} · venc. ${r.venc}`;
     return r;
   }
@@ -161,9 +216,10 @@
 
   const REGRAS = [
     [/ANUIDADE|TARIFA|IOF/, "Outros", "Tarifas bancárias"],
+    [/PIX CRED|CREDITO PESSOAL|EMPRESTIMO|EMPR[EÉ]STIMO/, "Dívidas", "Outros"],
     [/NETFLIX|DISNEY|PRIME ?VIDEO|AMAZON ?PRIME|GLOBOPLAY|MAX ?COM|HBO|DEEZER/, "Habitação", "Streaming (Prime, Netflix, Disney)"],
-    [/SPOTIFY|APPLE ?COM|YOUTUBE|GOOGLE ?(STORAGE|ONE|PLAY)/, "Lazer", "Spotify, música e outros"],
-    [/ANTHROPIC|CLAUDE|OPENAI|CHATGPT|ABACUS|NELOGICA|TOP GAIN|HOTMART|UDEMY|ALURA|KIWIFY|CURSO/, "Educação", "Cursos extracurriculares"],
+    [/SPOTIFY|APPLE ?COM|YOUTUBE|GOOGLE ?(STORAGE|ONE|PLAY)|AMAZON ?MUSIC/, "Lazer", "Spotify, música e outros"],
+    [/ANTHROPIC|CLAUDE|OPENAI|CHATGPT|ABACUS|NELOGICA|TOP GAIN|HOTMART|HTM\*|UDEMY|ALURA|KIWIFY|INLAB|CURSO/, "Educação", "Cursos extracurriculares"],
     [/COLEGIO|ESCOLA|FACULDADE|UNIVERSIDADE/, "Educação", "Outros"],
     [/LIVRAR|LIVRO/, "Educação", "Livros"],
     [/DROGA|FARMA|DRUGSTORE|PACHECO|ARAUJO|PAGUE MENOS/, "Saúde", "Farmácia"],
@@ -174,7 +230,7 @@
     [/PARK|ESTACION/, "Transporte", "Estacionamentos"],
     [/UBER|\b99\b|CABIFY/, "Transporte", "Apps de carro"],
     [/LAVA ?JATO|LAVAGEM/, "Transporte", "Lavagens"],
-    [/SUPERMERC|MERCADO|ATACAD|SACOLAO|HORTI|SUPERBOX|COMERCIAL|EMPORIO|ACOUGUE|CARNES|PANIFIC|PADARIA|\bPAO\b|BISCOIT|ADEGA/, "Habitação", "Supermercado"],
+    [/SUPERMERC|MERCADO|ATACAD|SACOLAO|HORTI|SUPERBOX|EMPORIO|ACOUGUE|CARNES|PANIFIC|PADARIA|\bPAO\b|BISCOIT|ADEGA/, "Habitação", "Supermercado"],
     [/FEIRA/, "Habitação", "Feira"],
     [/RESTAUR|LANCH|PIZZA|BURGU|ESFIHA|SPOLETO|SUBWAY|DOMINOS|IFOOD|CHURRASC|SUSHI|GORDINHO|OUTBACK|MC ?DONALD|BURGER/, "Lazer", "Restaurantes"],
     [/\bBAR\b|CERVEJ|CAFE|CAFETERIA/, "Lazer", "Cafés, bares e boates"],

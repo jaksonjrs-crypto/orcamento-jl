@@ -478,7 +478,7 @@
       </button>`;
     }
     html += `<div class="btns" style="margin-top:16px">
-      <button class="btn ghost" data-act="importar">💳 Importar fatura do cartão (PDF)</button>
+      <button class="btn ghost" data-act="importar">📄 Importar fatura do cartão ou conta (PDF)</button>
       <button class="btn ghost" data-act="copiar">Copiar lançamentos do mês anterior</button></div>
       <input type="file" id="fpdf" accept="application/pdf,.pdf" hidden>`;
     return html;
@@ -581,7 +581,7 @@
       pedir.depois();
       const r = window.Fatura.ler(paginas);
       aguarde.remove();
-      abrirRevisao(r);
+      if (r.tipo === "conta") abrirConta(r); else abrirRevisao(r);
     } catch (e) {
       aguarde.remove();
       const txt = String((e && (e.name + " " + e.message)) || e);
@@ -660,6 +660,50 @@
         bg.remove();
         st.ano = vy; st.mes = vm; st.tab = "lista"; st.filtro = "todos"; st.abertos["f:" + r.chave] = false;
         toast(`${regs.length} compras importadas`);
+        await recarregar(true); window.scrollTo(0, 0);
+      } catch (e) { toast("Erro ao salvar: " + e.message); x.disabled = false; x.textContent = "Tentar de novo"; }
+    });
+  }
+
+  // conta de luz/água: vira um lançamento só, substituindo o do mês se já existir
+  function abrirConta(r) {
+    const doMesConta = iso => { const [y, m] = iso.split("-").map(Number); return doMes(y, m); };
+    const candidatos = iso => doMesConta(iso).filter(l => l.tipo === "despesa" && !l.fatura && l.grupo === r.grupo && l.item === r.item)
+      .concat(dados.lanc.filter(l => String(l.obs || "").startsWith(r.chave)))
+      .filter((l, i, a) => a.findIndex(x => x.id === l.id) === i);
+    const icone = r.empresa === "Cemig" ? "💡" : "🚿";
+    const bg = abrirFolha(`
+      <h3>${icone} ${esc(r.chave)}</h3>
+      <p class="muted small">${esc(r.detalhe || "")}</p>
+      <div class="field"><label>Valor</label><input id="cv" class="money num" inputmode="decimal" value="${fmtValorInput(r.valor)}"></div>
+      <div class="field"><label>Categoria</label><select id="cc">${opcoesCategoria(r.grupo + "|" + r.item)}</select></div>
+      <div class="row2">
+        <div class="field"><label>Data (vencimento)</label><input id="cd" type="date" value="${r.vencISO}"></div>
+        <div class="field"><label>Pagamento</label><select id="cm">${MEIOS.map(x => `<option ${x === (r.debito ? "Débito Automático" : "Boleto") ? "selected" : ""}>${x}</option>`).join("")}</select></div>
+      </div>
+      <p class="muted small" style="margin-top:-4px">Entra no mês do vencimento. Se preferir no mês de referência (${esc(r.ref)}), mude a data.</p>
+      <div id="csub"></div>
+      <div class="btns two" style="margin-top:12px"><button class="btn ghost" data-x="fechar">Cancelar</button><button class="btn" data-x="ok">Salvar</button></div>`, true);
+    const subs = () => {
+      const c = candidatos($("#cd", bg).value || r.vencISO);
+      $("#csub", bg).innerHTML = c.length ? `<h4>Já existe no mês</h4>${c.map(l => `<label class="small linha"><input type="checkbox" data-sub="${l.id}" checked> Substituir “${esc(l.item)}” de ${l.data.split("-").reverse().join("/")} (${money(l.valor)})</label>`).join("")}` : "";
+    };
+    subs(); $("#cd", bg).addEventListener("change", subs);
+    bg.addEventListener("click", async ev => {
+      const x = ev.target.closest('[data-x="ok"]'); if (!x) return;
+      const v = parseValor($("#cv", bg).value); const data = $("#cd", bg).value;
+      if (!(v > 0)) { toast("Valor inválido"); return; }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) { toast("Informe a data"); return; }
+      const [grupo, item] = $("#cc", bg).value.split("|");
+      const reg = { data, tipo: "despesa", grupo, item, valor: v, meio: $("#cm", bg).value, usuario: nomeUsuario(), obs: [r.chave, r.detalhe].filter(Boolean).join(" · ") };
+      const remover = $$("[data-sub]:checked", bg).map(c => c.dataset.sub);
+      x.disabled = true; x.innerHTML = '<span class="spin"></span>';
+      try {
+        await api("lancamentos", { method: "POST", body: reg, headers: { Prefer: "return=minimal" } });
+        if (remover.length) await api("lancamentos?id=in.(" + remover.join(",") + ")", { method: "DELETE" });
+        bg.remove();
+        const [y, m] = data.split("-").map(Number); st.ano = y; st.mes = m; st.tab = "lista"; st.filtro = "todos";
+        toast(`${item} de ${money(v)} salva`);
         await recarregar(true); window.scrollTo(0, 0);
       } catch (e) { toast("Erro ao salvar: " + e.message); x.disabled = false; x.textContent = "Tentar de novo"; }
     });
