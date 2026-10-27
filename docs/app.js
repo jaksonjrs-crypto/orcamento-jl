@@ -478,7 +478,7 @@
       </button>`;
     }
     html += `<div class="btns" style="margin-top:16px">
-      <button class="btn ghost" data-act="importar">📄 Importar fatura do cartão ou conta (PDF)</button>
+      <button class="btn ghost" data-act="importar">📄 Importar PDF (fatura, conta ou cupom)</button>
       <button class="btn ghost" data-act="copiar">Copiar lançamentos do mês anterior</button></div>
       <input type="file" id="fpdf" accept="application/pdf,.pdf" hidden>`;
     return html;
@@ -581,7 +581,7 @@
       pedir.depois();
       const r = window.Fatura.ler(paginas);
       aguarde.remove();
-      if (r.tipo === "conta") abrirConta(r); else abrirRevisao(r);
+      if (r.tipo === "conta") abrirConta(r); else if (r.tipo === "cupom") abrirCupom(r); else abrirRevisao(r);
     } catch (e) {
       aguarde.remove();
       const txt = String((e && (e.name + " " + e.message)) || e);
@@ -704,6 +704,58 @@
         bg.remove();
         const [y, m] = data.split("-").map(Number); st.ano = y; st.mes = m; st.tab = "lista"; st.filtro = "todos";
         toast(`${item} de ${money(v)} salva`);
+        await recarregar(true); window.scrollTo(0, 0);
+      } catch (e) { toast("Erro ao salvar: " + e.message); x.disabled = false; x.textContent = "Tentar de novo"; }
+    });
+  }
+
+  // cupom fiscal eletrônico (NFC-e): um lançamento com o total, na categoria da loja
+  function abrirCupom(r) {
+    const c = window.Fatura.classificar({ desc: r.emitente }, (dados && dados.regras) || {});
+    const f = r.forma.toLowerCase();
+    const meioPadrao = /cr[eé]dito/.test(f) ? "Cartão de Crédito" : /d[eé]bito/.test(f) ? "Cartão de Débito" : /dinheiro/.test(f) ? "Dinheiro" : /pix/.test(f) ? "Pix"
+      : /alimenta/.test(f) ? "Ticket Alimentação" : /refei/.test(f) ? "Ticket Refeição" : "Outro";
+    const opcoesPago = MEIOS.filter(m => !["Ticket Restaurante", "Sodexo"].includes(m)).concat(["Ticket Alimentação", "Ticket Refeição", "Ticket Combustível"]);
+    const ja = dados.lanc.filter(l => String(l.obs || "").includes(r.chave));
+    const bg = abrirFolha(`
+      <h3>🧾 ${esc(r.emitente)}</h3>
+      <p class="muted small">Cupom fiscal ${esc(r.numero ? "nº " + r.numero : "")} · ${esc(r.data)}${r.forma ? " · pago com: " + esc(r.forma) : ""}</p>
+      ${r.itens.length ? `<div class="small" style="margin-bottom:10px">${r.itens.map(i => `<div class="kv"><span>${esc(i.desc)}</span><span class="num">${money(i.valor)}</span></div>`).join("")}</div>` : ""}
+      <div class="field"><label>Valor total</label><input id="uv" class="money num" inputmode="decimal" value="${fmtValorInput(r.total)}"></div>
+      <div class="field"><label>Categoria</label><select id="uc">${opcoesCategoria(c.grupo + "|" + c.item)}</select></div>
+      <div class="row2">
+        <div class="field"><label>Data</label><input id="ud" type="date" value="${r.vencISO}"></div>
+        <div class="field"><label>Pago com</label><select id="um">${opcoesPago.map(x => `<option ${x === meioPadrao ? "selected" : ""}>${x}</option>`).join("")}</select></div>
+      </div>
+      <div id="uaviso"></div>
+      ${ja.length ? `<div class="alert">Esse cupom já foi lançado. Ao salvar, o lançamento anterior será substituído.</div>` : ""}
+      <div class="btns two" style="margin-top:12px"><button class="btn ghost" data-x="fechar">Cancelar</button><button class="btn" data-x="ok">Salvar</button></div>`, true);
+    const aviso = () => {
+      const m = $("#um", bg).value;
+      $("#uaviso", bg).innerHTML = m === "Cartão de Crédito" ? `<div class="alert">Pago no cartão de crédito: essa compra também vai aparecer na fatura. Se vocês importam a fatura, não lance o cupom, para não contar duas vezes.</div>`
+        : /^Ticket/.test(m) ? `<p class="muted small">Vai entrar como gasto do benefício (${esc(m)}), descontando do saldo do ticket.</p>` : "";
+    };
+    aviso(); $("#um", bg).addEventListener("change", aviso);
+    bg.addEventListener("click", async ev => {
+      const x = ev.target.closest('[data-x="ok"]'); if (!x) return;
+      const v = parseValor($("#uv", bg).value); const data = $("#ud", bg).value; const pago = $("#um", bg).value;
+      if (!(v > 0)) { toast("Valor inválido"); return; }
+      const [grupo, item] = $("#uc", bg).value.split("|");
+      const obs = [r.chave, r.itens.slice(0, 3).map(i => i.desc).join(", ") + (r.itens.length > 3 ? "…" : "")].filter(Boolean).join(" · ");
+      let reg;
+      if (/^Ticket/.test(pago)) {
+        const lista = TIPOS.beneficio_gasto.grupos[pago] || ["Outros"];
+        const it = lista.includes(item) ? item : item === "Restaurantes" && lista.includes("Restaurante") ? "Restaurante" : "Outros";
+        reg = { data, tipo: "beneficio_gasto", grupo: pago, item: it, valor: v, meio: "Cartão Ticket", usuario: nomeUsuario(), obs };
+      } else reg = { data, tipo: "despesa", grupo, item, valor: v, meio: pago, usuario: nomeUsuario(), obs };
+      x.disabled = true; x.innerHTML = '<span class="spin"></span>';
+      try {
+        await api("lancamentos", { method: "POST", body: reg, headers: { Prefer: "return=minimal" } });
+        if (ja.length) await api("lancamentos?id=in.(" + ja.map(l => l.id).join(",") + ")", { method: "DELETE" });
+        if (reg.tipo === "despesa" && $("#uc", bg).value !== c.grupo + "|" + c.item) aprender([{ desc: r.emitente, grupo, item }]).catch(() => {});
+        bg.remove();
+        const [y, m] = data.split("-").map(Number); st.ano = y; st.mes = m; st.tab = "lista"; st.filtro = "todos";
+        toast(`Cupom de ${money(v)} salvo`);
         await recarregar(true); window.scrollTo(0, 0);
       } catch (e) { toast("Erro ao salvar: " + e.message); x.disabled = false; x.textContent = "Tentar de novo"; }
     });

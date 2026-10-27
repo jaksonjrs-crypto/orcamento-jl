@@ -178,6 +178,33 @@
     return { tipo: "conta", empresa: "Copasa", grupo: "Habitação", item: "Conta de água", ref: m[1], venc: m[2], valor: num(m[3]), detalhe: m3 ? m3 + " m³" : "" };
   }
 
+  // ---------- cupom fiscal eletrônico (NFC-e) ----------
+  function lerNFCe(paginas) {
+    const ls = paginas.flatMap(p => linhas(p.itens));
+    const txt = ls.join("\n");
+    let emitente = "";
+    const i = ls.findIndex(l => /CNPJ/i.test(l));
+    if (i >= 0) {
+      emitente = ls[i].replace(/^.*?CNPJ:?\s*[\d./-]+\s*/i, "").trim();
+      const prox = ls[i + 1] || "";
+      if (!emitente && prox) emitente = prox;
+      else if (/^[A-ZÀ-Ú.& ]{1,12}$/.test(prox)) emitente += " " + prox;
+    }
+    const data = (txt.match(/NFC-?e[^\n]*?(\d{2}\/\d{2}\/\d{4})/i) || txt.match(/(\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}/) || [])[1];
+    const total = num((txt.match(/Valor a pagar[^\d]{0,12}([\d.]+,\d{2})/i) || txt.match(/Valor total[^\d]{0,12}([\d.]+,\d{2})/i) || [])[1] || "NaN");
+    const numero = (txt.match(/NFC-?e\s*n?[ºo°]?\s*(\d+)/i) || [])[1] || "";
+    const fp = ls.findIndex(l => /FORMA DE PAGAMENTO/i.test(l));
+    const forma = fp >= 0 ? ((ls[fp + 1] || "").match(/^(.*?)\s+[\d.]+,\d{2}$/) || [])[1] || "" : "";
+    const itens = [];
+    for (const l of ls) {
+      const m = l.match(/^(\d{3,14})\s+(.+?)\s+\d+(?:,\d+)?\s+.*?([\d.]+,\d{2})$/);
+      if (m) itens.push({ desc: m[2].trim(), valor: num(m[3]) });
+    }
+    if (!data || !isFinite(total)) throw new Error("Não encontrei a data ou o valor total no cupom.");
+    const nome = emitente.toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase()).replace(/\b(Sa|S\.a\.?|Ltda|Me|Eireli)\b\.?/gi, "").trim();
+    return { tipo: "cupom", emitente: nome || "Cupom fiscal", data, venc: data, total, numero, forma: forma.trim(), itens };
+  }
+
   // ---------- estornos: um crédito anula uma compra de mesmo valor ----------
   function marcarEstornos(itens) {
     for (const neg of itens.filter(i => i.valor < 0)) {
@@ -189,15 +216,17 @@
   function ler(paginas) {
     const txt = textoCorrido(paginas);
     let r;
-    if (/CEMIG/.test(txt) && /ENERGIA EL[ÉE]TRICA/i.test(txt)) r = lerCemig(paginas);
+    if (/Nota Fiscal de Consumidor|NFC-?e/i.test(txt) && /Valor (a pagar|total)/i.test(txt)) r = lerNFCe(paginas);
+    else if (/CEMIG/.test(txt) && /ENERGIA EL[ÉE]TRICA/i.test(txt)) r = lerCemig(paginas);
     else if (/COMPANHIA DE SANEAMENTO DE MG|COPASA/i.test(txt)) r = lerCopasa(paginas);
     else if (/SANTANDER/i.test(txt) && /Detalhamento da Fatura/i.test(txt)) r = lerSantander(paginas);
     else if (/Ita[úu]|ITAU UNIBANCO/i.test(txt) && /Lan[çc]amentos: compras e saques/.test(txt)) r = lerItau(paginas);
     else if (/BANCO INTER|bancointer|inter\.co/i.test(txt) && /Despesas da fatura/.test(txt)) r = lerInter(paginas);
-    else throw new Error("Ainda não sei ler esse modelo de PDF. Hoje o app lê faturas Itaú, Santander e Inter e contas da Cemig e da Copasa.");
+    else throw new Error("Ainda não sei ler esse modelo de PDF. Hoje o app lê faturas Itaú, Santander e Inter, contas da Cemig e da Copasa e cupom fiscal eletrônico (NFC-e) em PDF.");
     if (!r.venc) throw new Error("Não encontrei a data de vencimento no PDF.");
     { const [d, m, a] = r.venc.split("/"); r.vencISO = `${a}-${m}-${d}`; }
     if (r.tipo === "conta") { r.chave = `${r.empresa} · ref. ${r.ref}`; return r; }
+    if (r.tipo === "cupom") { r.chave = `NFC-e ${r.numero} · ${r.emitente}`; return r; }
     r.tipo = "cartao";
     for (const it of r.itens) it.dataCompra = it.ano ? `${it.ano}-${it.data.slice(3)}-${it.data.slice(0, 2)}` : it.data ? dataCompleta(it.data, r.venc) : null;
     marcarEstornos(r.itens);
