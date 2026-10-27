@@ -624,8 +624,8 @@
       <div class="${r.confere ? "okbox" : "alert"}">${r.confere ? "✓ Confere com o total da fatura" : "⚠ A soma não bate com o total da fatura. Confira se o PDF está completo."}</div>
       ${r.saldoAnterior > 0 ? `<p class="muted small">A fatura cobra também ${money(r.saldoAnterior)} de saldo da fatura anterior. Não é compra nova, por isso não entra aqui.</p>` : ""}
       ${jaImportada ? `<div class="alert">Essa fatura já foi importada antes. Ao salvar, a importação anterior será substituída.</div>` : ""}
-      ${unicos.length ? `<h4>Lançamento único do cartão</h4><p class="muted small">Marque para remover e a fatura não contar duas vezes:</p>
-        ${unicos.map(l => `<label class="small linha"><input type="checkbox" data-unico="${l.id}" ${titulares.some(t => semAcento(l.item).includes(t)) ? "checked" : ""}> Remover “${esc(l.item)}” (${money(l.valor)})</label>`).join("")}` : ""}
+      ${unicos.length ? `<h4>Lançamento único do cartão</h4><p class="muted small">Se algum destes for desta mesma fatura, marque para remover e não contar duas vezes. Se for de outro cartão, deixe desmarcado.</p>
+        ${unicos.map(l => `<label class="small linha"><input type="checkbox" data-unico="${l.id}" ${titulares.some(t => semAcento(l.item).includes(t)) && [r.totalFatura, r.esperado, r.soma].some(v => isFinite(v) && v > 0 && Math.abs(l.valor - v) <= v * 0.02) ? "checked" : ""}> Remover “${esc(l.item)}” (${money(l.valor)})</label>`).join("")}` : ""}
       <h4>Compras ${conferir ? `<span class="muted small">· ${conferir} para conferir a categoria</span>` : ""}</h4>
       <div>${itens.map(linha).join("")}</div>
       <div class="sumline" style="margin-top:10px" id="rvsoma"></div>
