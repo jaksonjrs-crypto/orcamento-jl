@@ -757,7 +757,7 @@
         if (reg.tipo === "despesa" && $("#uc", bg).value !== c.grupo + "|" + c.item) aprender([{ desc: r.emitente, grupo, item }]).catch(() => {});
         bg.remove();
         const [y, m] = data.split("-").map(Number); st.ano = y; st.mes = m; st.tab = "lista"; st.filtro = "todos";
-        toast(`Cupom de ${money(v)} salvo`);
+        toast(`${r.tipo === "nfe" ? "Nota" : "Cupom"} de ${money(v)} salvo`);
         await recarregar(true); window.scrollTo(0, 0);
       } catch (e) { toast("Erro ao salvar: " + e.message); x.disabled = false; x.textContent = "Tentar de novo"; }
     });
