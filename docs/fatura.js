@@ -108,7 +108,7 @@
     const itens = []; let secao = null; let cartao = ""; let titular = ""; let primeiro = "";
     for (let l of linhasEmOrdem(paginas, 0.505)) {
       const cm = l.match(/^@?\s*(.+?)\s+-\s+\d{4}\s+X{4}\s+X{4}\s+(\d{4})/);
-      if (cm) { titular = cm[1].replace(/^@\s*/, ""); cartao = cm[2]; if (!primeiro) primeiro = cartao; secao = null; continue; }
+      if (cm) { titular = cm[1].replace(/^@\s*/, ""); cartao = cm[2] + (/^@/.test(l) ? " (virtual)" : ""); if (!primeiro) primeiro = cm[2]; secao = null; continue; }
       if (/^Pagamento e Demais Cr[ée]ditos/.test(l)) { secao = "creditos"; continue; }
       if (/^Parcelamentos$/.test(l)) { secao = "parcelas"; continue; }
       if (/^Despesas$/.test(l)) { secao = "despesas"; continue; }
