@@ -146,7 +146,9 @@
     }
     let metas = [];
     try { metas = await api("metas?select=*"); } catch (e) { metas = []; }
-    return { lanc: todos.map(x => Object.assign(x, { valor: Number(x.valor) })), metas };
+    const regras = {};
+    try { (await api("regras?select=*")).forEach(r => { regras[r.chave] = { grupo: r.grupo, item: r.item }; }); } catch (e) { /* tabela ainda não criada */ }
+    return { lanc: todos.map(x => Object.assign(x, { valor: Number(x.valor) })), metas, regras };
   }
 
   // ===================== ESTADO =====================
@@ -405,7 +407,8 @@
     form.addEventListener("submit", async ev => {
       ev.preventDefault(); lerForm();
       const f = st.form; const v = parseValor(f.valor);
-      if (!(v > 0)) { $("#ferr").textContent = "Informe um valor maior que zero."; $("#fv").focus(); return; }
+      const podeNegativo = st.editando && st.editando.fatura;
+      if (!isFinite(v) || v === 0 || (v < 0 && !podeNegativo)) { $("#ferr").textContent = "Informe um valor maior que zero."; $("#fv").focus(); return; }
       if (!/^\d{4}-\d{2}-\d{2}$/.test(f.data)) { $("#ferr").textContent = "Informe a data."; return; }
       const grupo = f.grupo === OUTRO ? (f.grupoNovo || "").trim() : f.grupo;
       const item = f.item === OUTRO ? (f.itemNovo || "").trim() : f.item;
@@ -416,6 +419,8 @@
       try {
         if (st.editando) {
           await api("lancamentos?id=eq." + st.editando.id, { method: "PATCH", body: reg });
+          if (st.editando.fatura && reg.tipo === "despesa" && (grupo !== st.editando.grupo || item !== st.editando.item))
+            aprender([{ desc: descDaObs(st.editando.obs), grupo, item }]).catch(() => {});
           toast("Lançamento atualizado");
           st.editando = null; st.form = null; st.tab = "lista";
         } else {
@@ -454,9 +459,15 @@
     html += `<div class="seg">${Object.entries(FILTROS).map(([k, v]) => `<button class="chip ${st.filtro === k ? "on" : ""}" data-filtro="${k}">${v}</button>`).join("")}</div>`;
     html += `<div class="sumline"><span>Renda <b class="num pos">${money(r.renda)}</b></span><span>Despesas + boleto <b class="num neg">${money(r.total)}</b></span></div>`;
     if (!lista.length) html += `<div class="empty">Nenhum lançamento ${st.filtro === "todos" ? "neste mês" : "com esse filtro"}.</div>`;
-    let dia = "";
+    let dia = ""; const faturasVistas = new Set();
     for (const l of lista) {
       if (l.data !== dia) { dia = l.data; const [y, m, d] = dia.split("-"); html += `<div class="day">${Number(d)} de ${MESES[Number(m) - 1]}</div>`; }
+      if (l.fatura) {
+        if (faturasVistas.has(l.fatura)) continue;
+        faturasVistas.add(l.fatura);
+        html += blocoFatura(l.fatura, lista.filter(x => x.fatura === l.fatura));
+        continue;
+      }
       const sinal = l.tipo === "receita" || l.tipo === "beneficio_credito" ? "+" : "−";
       const cls = l.tipo === "receita" ? "pos" : l.tipo === "despesa" ? "neg" : "";
       const letra = { receita: "R", despesa: "D", boleto: "B", beneficio_credito: "V", beneficio_gasto: "V" }[l.tipo];
@@ -466,12 +477,15 @@
         <span class="v num ${cls}">${sinal} ${money(l.valor)}</span>
       </button>`;
     }
-    html += `<div style="margin-top:16px"><button class="btn ghost" data-act="copiar">Copiar lançamentos do mês anterior</button></div>`;
+    html += `<div class="btns" style="margin-top:16px">
+      <button class="btn ghost" data-act="importar">💳 Importar fatura do cartão (PDF)</button>
+      <button class="btn ghost" data-act="copiar">Copiar lançamentos do mês anterior</button></div>
+      <input type="file" id="fpdf" accept="application/pdf,.pdf" hidden>`;
     return html;
   }
   function abrirCopia() {
     const pm = st.mes === 1 ? 12 : st.mes - 1; const py = st.mes === 1 ? st.ano - 1 : st.ano;
-    const ant = doMes(py, pm).slice().sort((a, b) => a.data.localeCompare(b.data));
+    const ant = doMes(py, pm).filter(l => !l.fatura).sort((a, b) => a.data.localeCompare(b.data));
     const bg = document.createElement("div"); bg.className = "sheet-bg";
     const lastDay = new Date(st.ano, st.mes, 0).getDate();
     const jaTem = new Set(doMes(st.ano, st.mes).map(l => l.tipo + "|" + l.grupo + "|" + l.item));
@@ -503,6 +517,188 @@
         catch (e) { toast("Erro: " + e.message); x.disabled = false; x.textContent = "Copiar"; }
       }
     });
+  }
+
+  // ---------- IMPORTAR FATURA DO CARTÃO (PDF) ----------
+  // O PDF é lido aqui no aparelho (pdf.js + fatura.js); só as compras revisadas vão para o banco.
+  const SENHAS_KEY = "orcamento.senhasPdf";
+  let pdfjsMod = null;
+  async function carregarPdfjs() {
+    if (pdfjsMod) return pdfjsMod;
+    const base = new URL("vendor/", location.href).href;
+    pdfjsMod = await import(base + "pdf.min.mjs");
+    pdfjsMod.GlobalWorkerOptions.workerSrc = base + "pdf.worker.min.mjs";
+    return pdfjsMod;
+  }
+  const descDaObs = obs => String(obs || "").split(" · ")[0];
+  const semAcento = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase();
+
+  function abrirFolha(html, fechavel) {
+    const bg = document.createElement("div"); bg.className = "sheet-bg";
+    bg.innerHTML = `<div class="sheet">${html}</div>`;
+    document.body.appendChild(bg);
+    if (fechavel) bg.addEventListener("click", ev => { const x = ev.target.closest("[data-x]"); if (x && x.dataset.x === "fechar") bg.remove(); });
+    return bg;
+  }
+  function senhasSalvas() { try { return JSON.parse(localStorage.getItem(SENHAS_KEY) || "[]"); } catch (e) { return []; } }
+  function pedirSenhaFactory() {
+    const fila = senhasSalvas().slice(); let lembrar = null; let pediu = false;
+    const fn = motivo => {
+      if (fila.length) return fila.shift();
+      pediu = true;
+      return new Promise(res => {
+        const bg = abrirFolha(`<h3>Fatura protegida por senha</h3>
+          <p class="muted small">${motivo === "errada" ? '<b class="neg">Senha incorreta.</b> ' : ""}Digite a senha do PDF (geralmente os primeiros números do CPF). Ela é usada só aqui no celular.</p>
+          <div class="field"><input id="pdfpw" type="password" autocomplete="off" inputmode="text"></div>
+          <label class="small linha"><input type="checkbox" id="pdflemb"> Lembrar esta senha neste aparelho</label>
+          <div class="btns two" style="margin-top:12px"><button class="btn ghost" data-x="cancelar">Cancelar</button><button class="btn" data-x="ok">Abrir</button></div>`);
+        const inp = $("#pdfpw", bg); setTimeout(() => inp.focus(), 50);
+        const fim = pw => { bg.remove(); res(pw); };
+        bg.addEventListener("click", ev => {
+          const x = ev.target.closest("[data-x]"); if (!x) return;
+          if (x.dataset.x === "cancelar") fim(null);
+          else { lembrar = $("#pdflemb", bg).checked ? inp.value : null; fim(inp.value); }
+        });
+        inp.addEventListener("keydown", ev => { if (ev.key === "Enter") $('[data-x="ok"]', bg).click(); });
+      });
+    };
+    fn.depois = () => {
+      if (!pediu || !lembrar) return;
+      const l = senhasSalvas(); if (!l.includes(lembrar)) l.push(lembrar);
+      try { localStorage.setItem(SENHAS_KEY, JSON.stringify(l)); } catch (e) { /* sem storage */ }
+    };
+    return fn;
+  }
+
+  async function importarFatura(file) {
+    const aguarde = abrirFolha(`<div class="empty"><span class="spin"></span> Lendo a fatura…</div>`);
+    try {
+      if (!window.Fatura) throw new Error("O leitor de faturas não carregou. Atualize a página e tente de novo.");
+      const pdfjs = await carregarPdfjs();
+      const data = new Uint8Array(await file.arrayBuffer());
+      const pedir = pedirSenhaFactory();
+      const paginas = await window.Fatura.extrairPaginas(pdfjs, data, pedir);
+      pedir.depois();
+      const r = window.Fatura.ler(paginas);
+      aguarde.remove();
+      abrirRevisao(r);
+    } catch (e) {
+      aguarde.remove();
+      const txt = String((e && (e.name + " " + e.message)) || e);
+      const msg = /Password|Worker was destroyed|destroyed/i.test(txt) ? "A fatura não foi aberta: a senha não foi informada."
+        : /Invalid PDF|InvalidPDF/i.test(txt) ? "Esse arquivo não é um PDF válido." : (e && e.message) || txt;
+      abrirFolha(`<h3>Não consegui ler esse PDF</h3><p class="muted">${esc(msg)}</p><div class="btns"><button class="btn" data-x="fechar">Ok</button></div>`, true);
+    }
+  }
+
+  function opcoesCategoria(sel) {
+    return GRUPOS_DESPESA.map(g => `<optgroup label="${esc(g)}">${itensDe("despesa", g).map(i => {
+      const v = g + "|" + i; return `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(i)}</option>`;
+    }).join("")}</optgroup>`).join("");
+  }
+
+  function abrirRevisao(r) {
+    const aprendidas = (dados && dados.regras) || {};
+    const itens = r.itens.map((it, i) => {
+      const c = window.Fatura.classificar(it, aprendidas);
+      return Object.assign({}, it, { i, sug: c.grupo + "|" + c.item, origem: c.origem });
+    });
+    const [vy, vm] = r.vencISO.split("-").map(Number);
+    const jaImportada = dados.lanc.some(l => l.fatura === r.chave);
+    const titulares = [...new Set(r.itens.map(i => semAcento(String(i.titular || "").split(" ")[0])).filter(Boolean))];
+    const unicos = doMes(vy, vm).filter(l => l.tipo === "despesa" && !l.fatura && /cart[ãa]o/i.test(l.item));
+    const cartoes = new Set(r.itens.map(i => i.cartao).filter(Boolean));
+    const conferir = itens.filter(i => i.origem === "palpite" && !i.estorno).length;
+    const linha = it => `<div class="rv ${it.origem === "palpite" && !it.estorno ? "conferir" : ""} ${it.estorno ? "estorno" : ""}">
+        <input type="checkbox" data-i="${it.i}" ${it.estorno ? "" : "checked"}>
+        <div><div class="t1">${esc(it.desc)}${it.parcela ? ` <span class="muted">${esc(it.parcela)}</span>` : ""}</div>
+          <div class="t2">${it.data ? "compra " + esc(it.data) : "taxa"}${it.cartao && cartoes.size > 1 ? " · final " + esc(it.cartao) : ""}${it.estorno ? " · estorno: anula outro lançamento de mesmo valor" : ""}${it.origem === "palpite" && !it.estorno ? " · confira a categoria" : ""}${it.origem === "aprendida" ? " · categoria que vocês escolheram antes" : ""}</div>
+          <select data-cat="${it.i}">${opcoesCategoria(it.sug)}</select></div>
+        <div class="v num ${it.valor < 0 ? "pos" : ""}">${it.valor < 0 ? "+ " + money(-it.valor) : money(it.valor)}</div>
+      </div>`;
+    const bg = abrirFolha(`
+      <h3>💳 ${esc(r.chave)}</h3>
+      <p class="muted small">Será lançada em <b>${MESES[vm - 1]} de ${vy}</b> (mês do vencimento), com cada compra na sua categoria.</p>
+      <div class="kv"><span>Compras lidas</span><span class="num">${itens.length} · ${money(r.soma)}</span></div>
+      <div class="kv"><span>Total de lançamentos impresso na fatura</span><span class="num">${isFinite(r.esperado) ? money(r.esperado) : "—"}</span></div>
+      <div class="${r.confere ? "okbox" : "alert"}">${r.confere ? "✓ Confere com o total da fatura" : "⚠ A soma não bate com o total da fatura. Confira se o PDF está completo."}</div>
+      ${r.saldoAnterior > 0 ? `<p class="muted small">A fatura cobra também ${money(r.saldoAnterior)} de saldo da fatura anterior. Não é compra nova, por isso não entra aqui.</p>` : ""}
+      ${jaImportada ? `<div class="alert">Essa fatura já foi importada antes. Ao salvar, a importação anterior será substituída.</div>` : ""}
+      ${unicos.length ? `<h4>Lançamento único do cartão</h4><p class="muted small">Marque para remover e a fatura não contar duas vezes:</p>
+        ${unicos.map(l => `<label class="small linha"><input type="checkbox" data-unico="${l.id}" ${titulares.some(t => semAcento(l.item).includes(t)) ? "checked" : ""}> Remover “${esc(l.item)}” (${money(l.valor)})</label>`).join("")}` : ""}
+      <h4>Compras ${conferir ? `<span class="muted small">· ${conferir} para conferir a categoria</span>` : ""}</h4>
+      <div>${itens.map(linha).join("")}</div>
+      <div class="sumline" style="margin-top:10px" id="rvsoma"></div>
+      <div class="btns two" style="margin-top:10px"><button class="btn ghost" data-x="fechar">Cancelar</button><button class="btn" data-x="ok">Salvar</button></div>`, true);
+    const somar = () => {
+      const sel = itens.filter(it => $(`[data-i="${it.i}"]`, bg).checked);
+      $("#rvsoma", bg).innerHTML = `<span>Selecionadas: <b>${sel.length}</b></span><span><b class="num">${money(sum(sel, x => x.valor))}</b></span>`;
+      $('[data-x="ok"]', bg).textContent = `Salvar ${sel.length} compras`;
+    };
+    somar();
+    bg.addEventListener("change", ev => { if (ev.target.matches("[data-i]")) somar(); });
+    bg.addEventListener("click", async ev => {
+      const x = ev.target.closest('[data-x="ok"]'); if (!x) return;
+      const sel = itens.filter(it => $(`[data-i="${it.i}"]`, bg).checked);
+      if (!sel.length) { toast("Marque pelo menos uma compra"); return; }
+      const corrigidas = [];
+      const regs = sel.map(it => {
+        const escolha = $(`[data-cat="${it.i}"]`, bg).value; const [grupo, item] = escolha.split("|");
+        if (escolha !== it.sug) corrigidas.push({ desc: it.desc, grupo, item });
+        return {
+          data: r.vencISO, tipo: "despesa", grupo, item, valor: it.valor, meio: "Cartão de Crédito", usuario: nomeUsuario(), fatura: r.chave,
+          obs: [it.desc + (it.parcela ? " " + it.parcela : ""), it.data ? "compra " + it.data : "", it.cartao ? "final " + it.cartao : ""].filter(Boolean).join(" · ")
+        };
+      });
+      const remover = $$("[data-unico]:checked", bg).map(c => c.dataset.unico);
+      x.disabled = true; x.innerHTML = '<span class="spin"></span>';
+      try {
+        if (jaImportada) await api("lancamentos?fatura=eq." + encodeURIComponent(r.chave), { method: "DELETE" });
+        for (let i = 0; i < regs.length; i += 200) await api("lancamentos", { method: "POST", body: regs.slice(i, i + 200), headers: { Prefer: "return=minimal" } });
+        if (remover.length) await api("lancamentos?id=in.(" + remover.join(",") + ")", { method: "DELETE" });
+        if (corrigidas.length) await aprender(corrigidas).catch(() => {});
+        bg.remove();
+        st.ano = vy; st.mes = vm; st.tab = "lista"; st.filtro = "todos"; st.abertos["f:" + r.chave] = false;
+        toast(`${regs.length} compras importadas`);
+        await recarregar(true); window.scrollTo(0, 0);
+      } catch (e) { toast("Erro ao salvar: " + e.message); x.disabled = false; x.textContent = "Tentar de novo"; }
+    });
+  }
+
+  // guarda as categorias que vocês corrigiram, para a próxima fatura já vir certa
+  async function aprender(lista) {
+    const rows = []; const vistos = new Set();
+    for (const x of lista) {
+      const k = window.Fatura ? window.Fatura.chave(x.desc) : "";
+      if (!k || vistos.has(k)) continue;
+      vistos.add(k); rows.push({ chave: k, grupo: x.grupo, item: x.item, updated_at: new Date().toISOString() });
+    }
+    if (!rows.length) return;
+    await api("regras", { method: "POST", body: rows, headers: { Prefer: "resolution=merge-duplicates,return=minimal" } });
+    if (dados) { dados.regras = dados.regras || {}; rows.forEach(r => { dados.regras[r.chave] = { grupo: r.grupo, item: r.item }; }); }
+  }
+
+  function blocoFatura(key, itens) {
+    const total = sum(itens, l => l.valor);
+    const lin = itens.slice().sort((a, b) => a.id - b.id).map(l => {
+      const compra = (String(l.obs || "").match(/compra (\d{2}\/\d{2})/) || [])[1];
+      return `<button class="tx mini" data-edit="${l.id}">
+        <span><div class="t1">${esc(descDaObs(l.obs) || l.item)}</div><div class="t2">${esc(l.grupo)} › ${esc(l.item)}${compra ? " · " + compra : ""}</div></span>
+        <span class="v num ${l.valor < 0 ? "pos" : "neg"}">${l.valor < 0 ? "+ " + money(-l.valor) : "− " + money(l.valor)}</span></button>`;
+    }).join("");
+    return `<div class="fat ${st.abertos["f:" + key] ? "open" : ""}">
+      <button class="tx" data-fat="${esc(key)}">
+        <span class="dot despesa">💳</span>
+        <span><div class="t1">${esc(key)}</div><div class="t2">${itens.length} compras · toque para ${st.abertos["f:" + key] ? "fechar" : "ver"}</div></span>
+        <span class="v num neg">− ${money(total)}</span></button>
+      <div class="fatitems">${lin}
+        <button class="btn danger" data-act="excluir-fatura" data-key="${esc(key)}" style="margin:4px 0 12px">Excluir esta fatura inteira</button></div>
+    </div>`;
+  }
+  async function excluirFatura(key) {
+    if (!key || !confirm(`Excluir todas as compras da fatura “${key}”? Você pode importá-la de novo depois.`)) return;
+    try { await api("lancamentos?fatura=eq." + encodeURIComponent(key), { method: "DELETE" }); toast("Fatura excluída"); await recarregar(true); }
+    catch (e) { toast("Erro: " + e.message); }
   }
 
   // ---------- ANO ----------
@@ -664,12 +860,16 @@
       else if (a === "cancelar") { st.editando = null; st.form = null; st.tab = "lista"; render(); }
       else if (a === "excluir") excluirAtual();
       else if (a === "copiar") abrirCopia();
+      else if (a === "importar") { const i = $("#fpdf"); if (i) i.click(); }
+      else if (a === "excluir-fatura") excluirFatura(b.dataset.key);
       else if (a === "csv-grade") exportarGrade();
       else if (a === "csv-lanc") exportarLanc();
     }));
     $$("[data-grp]").forEach(b => b.addEventListener("click", () => { const g = b.dataset.grp; st.abertos[g] = !st.abertos[g]; b.parentElement.classList.toggle("open"); }));
     $$("[data-filtro]").forEach(b => b.addEventListener("click", () => { st.filtro = b.dataset.filtro; render(); }));
     $$("[data-edit]").forEach(b => b.addEventListener("click", () => abrirEdicao(b.dataset.edit)));
+    $$("[data-fat]").forEach(b => b.addEventListener("click", () => { const k = "f:" + b.dataset.fat; st.abertos[k] = !st.abertos[k]; render(); }));
+    const fp = $("#fpdf"); if (fp) fp.addEventListener("change", () => { const f = fp.files[0]; fp.value = ""; if (f) importarFatura(f); });
   }
 
   // atualiza ao voltar para o app (para ver o que o outro lançou)

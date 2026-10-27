@@ -259,3 +259,22 @@ table.grid tr.tot td { font-weight: 800; }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 .spin { display: inline-block; width: 16px; height: 16px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: s .7s linear infinite; vertical-align: -3px; }
 @keyframes s { to { transform: rotate(360deg); } }
+
+/* ---------- fatura importada ---------- */
+.fat .fatitems { display: none; padding-left: 10px; border-left: 2px solid var(--line); margin: -2px 0 8px 16px; }
+.fat.open .fatitems { display: block; }
+.tx.mini { grid-template-columns: 1fr auto; padding: 8px 10px; }
+.tx.mini .t1 { font-size: 13.5px; }
+.sheet h4 { margin: 16px 0 6px; font-size: 14px; }
+.linha { display: flex; gap: 8px; align-items: center; padding: 4px 0; }
+.linha input { width: 18px; height: 18px; accent-color: var(--brand); }
+.okbox { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--brand-soft); color: var(--pos); font-weight: 600; font-size: 14px; }
+.rv { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); align-items: start; }
+.rv input[type=checkbox] { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--brand); }
+.rv .t1 { font-weight: 600; font-size: 14px; word-break: break-word; }
+.rv .t2 { font-size: 12px; color: var(--ink-3); }
+.rv select { width: 100%; margin-top: 6px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: var(--surface); font-size: 14px; color: var(--ink); }
+.rv .v { font-weight: 700; font-size: 14px; }
+.rv.conferir .t2 { color: var(--warn); font-weight: 600; }
+.rv.conferir select { border-color: var(--warn); }
+.rv.estorno { opacity: .6; }
