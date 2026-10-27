@@ -581,7 +581,7 @@
       pedir.depois();
       const r = window.Fatura.ler(paginas);
       aguarde.remove();
-      if (r.tipo === "conta") abrirConta(r); else if (r.tipo === "cupom") abrirCupom(r); else abrirRevisao(r);
+      if (r.tipo === "conta") abrirConta(r); else if (r.tipo === "cupom" || r.tipo === "nfe") abrirCupom(r); else abrirRevisao(r);
     } catch (e) {
       aguarde.remove();
       const txt = String((e && (e.name + " " + e.message)) || e);
@@ -711,7 +711,8 @@
 
   // cupom fiscal eletrônico (NFC-e): um lançamento com o total, na categoria da loja
   function abrirCupom(r) {
-    const c = window.Fatura.classificar({ desc: r.emitente }, (dados && dados.regras) || {});
+    let c = window.Fatura.classificar({ desc: r.emitente }, (dados && dados.regras) || {});
+    if (c.origem === "palpite" && r.itens.length) { const ci = window.Fatura.classificar({ desc: r.itens[0].texto || r.itens[0].desc }, (dados && dados.regras) || {}); if (ci.origem !== "palpite") c = ci; }
     const f = r.forma.toLowerCase();
     const meioPadrao = /cr[eé]dito/.test(f) ? "Cartão de Crédito" : /d[eé]bito/.test(f) ? "Cartão de Débito" : /dinheiro/.test(f) ? "Dinheiro" : /pix/.test(f) ? "Pix"
       : /alimenta/.test(f) ? "Ticket Alimentação" : /refei/.test(f) ? "Ticket Refeição" : "Outro";
@@ -719,7 +720,8 @@
     const ja = dados.lanc.filter(l => String(l.obs || "").includes(r.chave));
     const bg = abrirFolha(`
       <h3>🧾 ${esc(r.emitente)}</h3>
-      <p class="muted small">Cupom fiscal ${esc(r.numero ? "nº " + r.numero : "")} · ${esc(r.data)}${r.forma ? " · pago com: " + esc(r.forma) : ""}</p>
+      <p class="muted small">${r.tipo === "nfe" ? "Nota fiscal" : "Cupom fiscal"} ${esc(r.numero ? "nº " + r.numero : "")} · ${esc(r.data)}${r.forma ? " · pago com: " + esc(r.forma) : ""}</p>
+      ${r.tipo === "nfe" ? `<p class="muted small">Compras online costumam ser pagas no cartão de crédito. Se foi o caso, ela já vem na fatura: não precisa lançar a nota.</p>` : ""}
       ${r.itens.length ? `<div class="small" style="margin-bottom:10px">${r.itens.map(i => `<div class="kv"><span>${esc(i.desc)}</span><span class="num">${money(i.valor)}</span></div>`).join("")}</div>` : ""}
       <div class="field"><label>Valor total</label><input id="uv" class="money num" inputmode="decimal" value="${fmtValorInput(r.total)}"></div>
       <div class="field"><label>Categoria</label><select id="uc">${opcoesCategoria(c.grupo + "|" + c.item)}</select></div>

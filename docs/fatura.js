@@ -205,6 +205,39 @@
     return { tipo: "cupom", emitente: nome || "Cupom fiscal", data, venc: data, total, numero, forma: forma.trim(), itens };
   }
 
+  // ---------- nota fiscal eletrônica (NF-e / DANFE) ----------
+  function lerNFe(paginas) {
+    const ls = paginas.flatMap(p => linhas(p.itens));
+    const txt = ls.join("\n");
+    let emitente = (txt.match(/Recebemos de\s+(.+?)\s+os produtos/i) || [])[1] || "";
+    if (!emitente) { const i = ls.findIndex(l => /^DANFE$/.test(l)); emitente = i > 0 ? ls[i + 1] || "" : ""; }
+    const data = (txt.match(/DATA D[AE] EMISS[ÃA]O[\s\S]{0,400}?(\d{2}\/\d{2}\/\d{4})/i) || [])[1];
+    const iv = ls.findIndex(l => /VALOR TOTAL DA NOTA/i.test(l));
+    const vals = iv >= 0 ? (ls[iv + 1] || "").match(/[\d.]+,\d{1,2}/g) : null;
+    const total = vals ? num(vals[vals.length - 1]) : NaN;
+    const numero = ((txt.match(/N[ºo°]\.?\s*([\d.]{5,})/) || [])[1] || "").replace(/\./g, "").replace(/^0+/, "");
+    // produtos: a descrição pode quebrar em várias linhas antes/depois da linha com NCM e valores
+    const ip = ls.findIndex(l => /DADOS DOS PRODUTOS/i.test(l));
+    const itens = []; let pre = [];
+    const limpa = t => t.replace(/^\S*\d\S*\s+/, "");   // tira o código do produto do começo da linha
+    if (ip >= 0) for (const l of ls.slice(ip + 1, ip + 60)) {
+      if (/DADOS ADICIONAIS|C[ÁA]LCULO DO ISSQN/i.test(l)) break;
+      if (/^(C[ÓO]DIGO|PRODUTO|DESCRI[ÇC][ÃA]O)\b/i.test(l)) continue;
+      const m = l.match(/^(.*?)\s+\d{8}\s+\d{3,4}\s+\d{4}\s+\S+\s+[\d.,]+\s+[\d.,]+\s+[\d.,]+\s+([\d.]+,\d{2})/);
+      if (m) { itens.push({ partes: pre.concat(limpa(m[1])), valor: num(m[2]) }); pre = []; }
+      else pre.push(limpa(l));
+    }
+    if (itens.length && pre.length) itens[itens.length - 1].partes.push(...pre);
+    for (const it of itens) {
+      it.texto = it.partes.join(" ").replace(/\s+/g, " ").trim();
+      it.desc = it.texto.replace(/\s*(INF\.?\s*CONTRIBUINTE|IMUNIDADE|INCISO|ISBN).*$/i, "").trim() || it.texto.slice(0, 40);
+      delete it.partes;
+    }
+    if (!data || !isFinite(total)) throw new Error("Não encontrei a data de emissão ou o valor total da nota.");
+    const nome = emitente.toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase()).replace(/\b(Sa|S\.a\.?|Ltda|Me|Eireli)\b\.?/gi, "").replace(/\s+/g, " ").trim();
+    return { tipo: "nfe", emitente: nome || "Nota fiscal", data, venc: data, total, numero, forma: "", itens };
+  }
+
   // ---------- estornos: um crédito anula uma compra de mesmo valor ----------
   function marcarEstornos(itens) {
     for (const neg of itens.filter(i => i.valor < 0)) {
@@ -217,16 +250,18 @@
     const txt = textoCorrido(paginas);
     let r;
     if (/Nota Fiscal de Consumidor|NFC-?e/i.test(txt) && /Valor (a pagar|total)/i.test(txt)) r = lerNFCe(paginas);
+    else if (/DANFE/.test(txt) && /VALOR TOTAL DA NOTA/i.test(txt)) r = lerNFe(paginas);
     else if (/CEMIG/.test(txt) && /ENERGIA EL[ÉE]TRICA/i.test(txt)) r = lerCemig(paginas);
     else if (/COMPANHIA DE SANEAMENTO DE MG|COPASA/i.test(txt)) r = lerCopasa(paginas);
     else if (/SANTANDER/i.test(txt) && /Detalhamento da Fatura/i.test(txt)) r = lerSantander(paginas);
     else if (/Ita[úu]|ITAU UNIBANCO/i.test(txt) && /Lan[çc]amentos: compras e saques/.test(txt)) r = lerItau(paginas);
     else if (/BANCO INTER|bancointer|inter\.co/i.test(txt) && /Despesas da fatura/.test(txt)) r = lerInter(paginas);
-    else throw new Error("Ainda não sei ler esse modelo de PDF. Hoje o app lê faturas Itaú, Santander e Inter, contas da Cemig e da Copasa e cupom fiscal eletrônico (NFC-e) em PDF.");
+    else throw new Error("Ainda não sei ler esse modelo de PDF. Hoje o app lê faturas Itaú, Santander e Inter, contas da Cemig e da Copasa, cupom fiscal eletrônico (NFC-e) e nota fiscal eletrônica (NF-e) em PDF.");
     if (!r.venc) throw new Error("Não encontrei a data de vencimento no PDF.");
     { const [d, m, a] = r.venc.split("/"); r.vencISO = `${a}-${m}-${d}`; }
     if (r.tipo === "conta") { r.chave = `${r.empresa} · ref. ${r.ref}`; return r; }
     if (r.tipo === "cupom") { r.chave = `NFC-e ${r.numero} · ${r.emitente}`; return r; }
+    if (r.tipo === "nfe") { r.chave = `NF-e ${r.numero} · ${r.emitente}`; return r; }
     r.tipo = "cartao";
     for (const it of r.itens) it.dataCompra = it.ano ? `${it.ano}-${it.data.slice(3)}-${it.data.slice(0, 2)}` : it.data ? dataCompleta(it.data, r.venc) : null;
     marcarEstornos(r.itens);
@@ -250,7 +285,7 @@
     [/SPOTIFY|APPLE ?COM|YOUTUBE|GOOGLE ?(STORAGE|ONE|PLAY)|AMAZON ?MUSIC/, "Lazer", "Spotify, música e outros"],
     [/ANTHROPIC|CLAUDE|OPENAI|CHATGPT|ABACUS|NELOGICA|TOP GAIN|HOTMART|HTM\*|UDEMY|ALURA|KIWIFY|INLAB|CURSO/, "Educação", "Cursos extracurriculares"],
     [/COLEGIO|ESCOLA|FACULDADE|UNIVERSIDADE/, "Educação", "Outros"],
-    [/LIVRAR|LIVRO/, "Educação", "Livros"],
+    [/LIVRAR|LIVRO|ISBN|EDITORA/, "Educação", "Livros"],
     [/DROGA|FARMA|DRUGSTORE|PACHECO|ARAUJO|PAGUE MENOS/, "Saúde", "Farmácia"],
     [/ODONTO|DENTIS/, "Saúde", "Dentista"],
     [/CLINICA|LABORAT|HOSPITAL|MEDIC/, "Saúde", "Médicos e terapeutas"],
