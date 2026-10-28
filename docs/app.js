@@ -7,10 +7,10 @@
     despesa: { label: "Despesa", chip: "t-neg", grupos: {
       "Habitação": ["Aluguel", "Condomínio", "IPTU", "Conta de água", "Conta de energia", "Seguro residencial", "Conta de gás", "Celular + TV + internet", "Celular", "Streaming (Prime, Netflix, Disney)", "Supermercado", "Feira", "Semear", "Faxineira"],
       "Dívidas": ["Financiamento", "Cheque especial", "Cartão de crédito Lílian", "Cartão de crédito Jakson", "Tributos atrasados", "Outros"],
-      "Saúde": ["Plano de saúde", "Médicos e terapeutas", "Dentista", "Farmácia", "Outros"],
+      "Saúde": ["Plano de saúde", "Médicos e terapeutas", "Dentista", "Exames e laboratório", "Farmácia", "Outros"],
       "Transporte": ["Licenciamento + multas", "IPVA + seguro obrigatório", "Seguro do carro", "Combustível", "Estacionamentos", "Lavagens", "Mecânico / revisão", "Multas", "Pedágios + tag", "Apps de carro"],
       "Despesas Pessoais": ["Pós-graduação", "Material escolar", "Higiene pessoal", "Cosméticos", "Cabeleireiro", "Vestuário", "Academia", "Seguro de vida", "Outros"],
-      "Educação": ["Cursos extracurriculares", "Livros", "Outros"],
+      "Educação": ["Escola / faculdade", "Cursos extracurriculares", "Livros", "Outros"],
       "Lazer": ["Restaurantes", "Cafés, bares e boates", "Livraria, jornais e revistas", "Spotify, música e outros", "Passeios", "Outros"],
       "Outros": ["Tarifas bancárias", "Ajuda aos pais", "Doações", "Dízimos", "Extras diários", "Manutenção e reparos", "Médicos esporádicos", "Remédios", "Suplementos academia", "Presente de Natal", "Presentes do mês", "Utilidades domésticas e decoração", "Manutenção do veículo", "Outros"]
     }},
@@ -337,6 +337,163 @@
       ${benef}`;
   }
 
+  // ---------- NOTAS GUARDADAS (arquivos para o Imposto de Renda) ----------
+  // Os arquivos ficam no Storage do Supabase (pasta privada "notas"), só para quem tem login.
+  const BUCKET = "notas";
+  const PESSOAS_BASE = ["Lílian", "Jakson"];
+  const OUTRA_PESSOA = "＋ Outra pessoa…";
+  // sugestão do que costuma ser dedutível (o contador confirma)
+  const IR_SUGERIDO = {
+    "Saúde": ["Plano de saúde", "Médicos e terapeutas", "Dentista", "Exames e laboratório"],
+    "Outros": ["Médicos esporádicos"],
+    "Educação": ["Escola / faculdade"],
+    "Despesas Pessoais": ["Pós-graduação"]
+  };
+  const irSugerido = (tipo, grupo, item) => tipo === "despesa" && (IR_SUGERIDO[grupo] || []).includes(item);
+  function pessoasIR() {
+    const s = PESSOAS_BASE.slice();
+    if (dados) dados.lanc.forEach(l => { if (l.ir_pessoa && !s.includes(l.ir_pessoa)) s.push(l.ir_pessoa); });
+    return s;
+  }
+  function pessoaPadrao() { const n = semAcento(nomeUsuario()); return n.startsWith("JAK") ? "Jakson" : "Lílian"; }
+  const slugNota = s => semAcento(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "nota";
+  const caminhoUrl = p => p.split("/").map(encodeURIComponent).join("/");
+
+  // fotos grandes da câmera viram JPEG menor (~300 KB) antes de subir
+  async function prepararArquivo(file) {
+    const tipo = file.type || (/\.pdf$/i.test(file.name || "") ? "application/pdf" : "");
+    if (/^image\//.test(tipo) && !/gif|svg/.test(tipo)) {
+      try {
+        const bmp = await createImageBitmap(file);
+        const escala = Math.min(1, 1800 / Math.max(bmp.width, bmp.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(bmp.width * escala); c.height = Math.round(bmp.height * escala);
+        c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+        const blob = await new Promise(res => c.toBlob(res, "image/jpeg", 0.82));
+        if (blob && blob.size < file.size) return { blob, tipo: "image/jpeg", ext: "jpg" };
+      } catch (e) { /* formato que o navegador não decodifica: sobe o original */ }
+      return { blob: file, tipo, ext: (tipo.split("/")[1] || "jpg").replace("jpeg", "jpg") };
+    }
+    if (tipo === "application/pdf") return { blob: file, tipo, ext: "pdf" };
+    throw new Error("Envie uma foto ou um arquivo PDF.");
+  }
+  async function enviarNota(file, data, nome) {
+    const p = await prepararArquivo(file);
+    if (p.blob.size > 10 * 1024 * 1024) throw new Error("Arquivo maior que 10 MB.");
+    const caminho = `${data.slice(0, 4)}/${data}_${slugNota(nome)}_${Date.now().toString(36)}.${p.ext}`;
+    const res = await fetch(`${BASE}/storage/v1/object/${BUCKET}/${caminhoUrl(caminho)}`, {
+      method: "POST", body: p.blob,
+      headers: { apikey: KEY, Authorization: "Bearer " + (await token()), "Content-Type": p.tipo, "x-upsert": "true" }
+    });
+    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error("Não foi possível guardar a nota: " + (j.message || j.error || "erro " + res.status)); }
+    return { anexo: caminho, anexo_nome: file.name || `nota.${p.ext}` };
+  }
+  async function baixarNota(caminho) {
+    const res = await fetch(`${BASE}/storage/v1/object/authenticated/${BUCKET}/${caminhoUrl(caminho)}`, { headers: { apikey: KEY, Authorization: "Bearer " + (await token()) } });
+    if (!res.ok) throw new Error("Não encontrei o arquivo da nota (erro " + res.status + ").");
+    return res.blob();
+  }
+  async function apagarNotas(caminhos) {
+    caminhos = caminhos.filter(Boolean); if (!caminhos.length) return;
+    try {
+      await fetch(`${BASE}/storage/v1/object/${BUCKET}`, { method: "DELETE", body: JSON.stringify({ prefixes: caminhos }),
+        headers: { apikey: KEY, Authorization: "Bearer " + (await token()), "Content-Type": "application/json" } });
+    } catch (e) { /* sobra um arquivo solto, sem prejuízo */ }
+  }
+  // mostra a nota (foto na tela; PDF em botão para abrir) com opção de compartilhar (WhatsApp, e-mail…)
+  async function verNota(origem, nome) {
+    const bg = abrirFolha(`<div class="empty" id="nv"><span class="spin"></span> Abrindo a nota…</div>
+      <div class="btns" style="margin-top:12px"><button class="btn ghost" data-x="fechar">Fechar</button></div>`, true);
+    try {
+      const blob = origem instanceof Blob ? origem : await baixarNota(origem);
+      const url = URL.createObjectURL(blob);
+      const arq = nome || (typeof origem === "string" ? origem.split("/").pop() : "nota");
+      const img = /^image\//.test(blob.type);
+      $("#nv", bg).outerHTML = `<h3>📎 ${esc(arq)}</h3>
+        ${img ? `<img src="${url}" alt="Nota" style="width:100%;border-radius:10px;border:1px solid var(--line)">` : `<p class="muted">Arquivo PDF (${(blob.size / 1024).toFixed(0)} KB).</p>`}
+        <div class="btns" style="margin-top:12px">
+          <a class="btn" href="${url}" target="_blank" rel="noopener" ${img ? "" : `download="${esc(arq)}"`}>${img ? "Abrir em tela cheia" : "Abrir PDF"}</a>
+          ${navigator.canShare ? `<button class="btn ghost" data-x="compartilhar">Compartilhar</button>` : ""}
+        </div>`;
+      bg.addEventListener("click", async ev => {
+        if (!ev.target.closest('[data-x="compartilhar"]')) return;
+        const file = new File([blob], arq, { type: blob.type });
+        try { if (navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: arq }); else toast("Este aparelho não compartilha arquivos daqui."); }
+        catch (e) { /* cancelado */ }
+      });
+    } catch (e) { const nv = $("#nv", bg); if (nv) nv.innerHTML = `<p class="neg">${esc(e.message)}</p>`; }
+  }
+
+  // campos de nota + IR reaproveitados no Lançar e nas importações
+  function camposIR(pref, tipo, ir, pessoa, pessoaNova) {
+    if (tipo !== "despesa") return "";
+    const ps = pessoasIR(); if (pessoa && pessoa !== OUTRA_PESSOA && !ps.includes(pessoa)) ps.push(pessoa);
+    return `<label class="linha irlinha"><input type="checkbox" id="${pref}ir" ${ir ? "checked" : ""}> Dedutível no Imposto de Renda</label>
+      ${ir ? `<div class="field"><label for="${pref}irp">Para quem</label><select id="${pref}irp">${ps.concat(OUTRA_PESSOA).map(p => `<option ${p === (pessoa || pessoaPadrao()) ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></div>
+      ${pessoa === OUTRA_PESSOA ? `<div class="field"><label for="${pref}irn">Nome</label><input id="${pref}irn" maxlength="30" placeholder="Ex.: nome do filho" value="${esc(pessoaNova || "")}"></div>` : ""}` : ""}`;
+  }
+  function lerPessoa(pref, root) {
+    const sel = $(`#${pref}irp`, root); if (!sel) return pessoaPadrao();
+    return sel.value === OUTRA_PESSOA ? (($(`#${pref}irn`, root) || {}).value || "").trim() : sel.value;
+  }
+
+  // ---------- pacote do IR: todas as notas do ano + resumo, num .zip ----------
+  let jszipCarregado = null;
+  function carregarJSZip() {
+    if (window.JSZip) return Promise.resolve(window.JSZip);
+    return jszipCarregado || (jszipCarregado = new Promise((res, rej) => {
+      const s = document.createElement("script"); s.src = "vendor/jszip.min.js";
+      s.onload = () => res(window.JSZip); s.onerror = () => rej(new Error("Não carreguei o gerador de .zip. Verifique a internet."));
+      document.head.appendChild(s);
+    }));
+  }
+  function csvLinhas(linhas) {
+    return "﻿" + linhas.map(l => l.map(c => {
+      if (typeof c === "number") return c.toFixed(2).replace(".", ",");
+      const s = String(c == null ? "" : c); return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(";")).join("\r\n");
+  }
+  async function pacoteIR(y) {
+    const doAno = dados.lanc.filter(l => l.data.startsWith(String(y)) && (l.ir || l.anexo)).sort((a, b) => a.data.localeCompare(b.data));
+    if (!doAno.length) { toast("Nenhuma nota ou despesa dedutível em " + y); return; }
+    const bg = abrirFolha(`<h3>📦 Notas de ${y}</h3><div class="empty" id="zp"><span class="spin"></span> Preparando…</div>`);
+    try {
+      const JSZip = await carregarJSZip();
+      const zip = new JSZip(); const raiz = zip.folder(`Notas ${y}`);
+      const L = [["Data", "Dedutível IR", "Para quem", "Categoria", "Item", "Valor (R$)", "Pagamento", "Observação", "Arquivo"]];
+      let n = 0; const falhas = [];
+      for (const l of doAno) {
+        let arquivo = "";
+        if (l.anexo) {
+          $("#zp", bg).innerHTML = `<span class="spin"></span> Baixando nota ${++n} de ${doAno.filter(x => x.anexo).length}…`;
+          const pasta = l.ir ? (l.ir_pessoa || "Sem nome") : "Outras notas";
+          const nomeArq = l.anexo.split("/").pop();
+          try { raiz.folder(pasta).file(nomeArq, await baixarNota(l.anexo)); arquivo = `${pasta}/${nomeArq}`; }
+          catch (e) { falhas.push(l); arquivo = "(não baixou)"; }
+        }
+        L.push([l.data.split("-").reverse().join("/"), l.ir ? "Sim" : "Não", l.ir_pessoa || "", l.grupo, l.item, l.valor, l.meio, l.obs, arquivo || (l.ir ? "SEM NOTA" : "")]);
+      }
+      L.push([]); L.push(["TOTAL DEDUTÍVEL POR PESSOA"]);
+      const porP = {}; doAno.filter(l => l.ir).forEach(l => { porP[l.ir_pessoa || "Sem nome"] = (porP[l.ir_pessoa || "Sem nome"] || 0) + l.valor; });
+      Object.entries(porP).forEach(([p, v]) => L.push([p, "", "", "", "", v]));
+      raiz.file(`Resumo IR ${y}.csv`, csvLinhas(L));
+      $("#zp", bg).innerHTML = `<span class="spin"></span> Gerando o arquivo .zip…`;
+      const blob = await zip.generateAsync({ type: "blob" });
+      const nome = `Notas-IR-${y}.zip`;
+      const url = URL.createObjectURL(blob);
+      $("#zp", bg).outerHTML = `<p>${doAno.filter(l => l.anexo).length - falhas.length} notas + planilha-resumo (${(blob.size / 1048576).toFixed(1)} MB).</p>
+        ${falhas.length ? `<p class="neg small">${falhas.length} nota(s) não baixaram. Tente de novo mais tarde.</p>` : ""}
+        <div class="btns"><a class="btn" href="${url}" download="${nome}">Baixar .zip</a>
+        ${navigator.canShare && navigator.canShare({ files: [new File([blob], nome, { type: "application/zip" })] }) ? `<button class="btn ghost" data-x="share">Enviar (WhatsApp, e-mail…)</button>` : ""}
+        <button class="btn ghost" data-x="fechar">Fechar</button></div>`;
+      bg.addEventListener("click", async ev => {
+        const x = ev.target.closest("[data-x]"); if (!x) return;
+        if (x.dataset.x === "fechar") bg.remove();
+        if (x.dataset.x === "share") { try { await navigator.share({ files: [new File([blob], nome, { type: "application/zip" })], title: nome }); } catch (e) { /* cancelado */ } }
+      });
+    } catch (e) { bg.remove(); toast("Erro: " + e.message); }
+  }
+
   // ---------- LANÇAR ----------
   function formPadrao() {
     const hoje = hojeISO();
@@ -365,6 +522,9 @@
     const itens = f.grupo === OUTRO ? [] : itensDe(f.tipo, f.grupo);
     if (f.item && f.item !== OUTRO && !itens.includes(f.item)) itens.push(f.item);
     if (!f.item) f.item = itens[0] || OUTRO;
+    if (f.ir === undefined) f.ir = irSugerido(f.tipo, f.grupo, f.item);
+    const temNota = f.arquivo || (f.anexo && !f.removerAnexo);
+    const nomeNota = f.arquivo ? f.arquivo.name || "foto" : f.anexo_nome || (f.anexo || "").split("/").pop();
     const meios = MEIOS.slice(); if (f.meio && !meios.includes(f.meio)) meios.push(f.meio);
     const opt = (arr, v) => arr.map(x => `<option ${x === v ? "selected" : ""}>${esc(x)}</option>`).join("");
     const ed = st.editando;
@@ -381,6 +541,13 @@
         <div class="field"><label for="fm">Pagamento</label><select id="fm">${opt(meios, f.meio)}</select></div>
       </div>
       <div class="field"><label for="fo">Observação (opcional)</label><input id="fo" maxlength="140" value="${esc(f.obs)}"></div>
+      <div class="notabox">
+        ${temNota ? `<div class="notaok"><span>📎 ${esc(nomeNota)}${f.arquivo ? ' <span class="muted small">(será enviada ao salvar)</span>' : ""}</span>
+            <span><button type="button" class="linkbtn" data-act="ver-nota">Ver</button><button type="button" class="linkbtn neg" data-act="tirar-nota">Remover</button></span></div>`
+          : `<button type="button" class="btn ghost" data-act="anexar">📎 Anexar nota (foto ou PDF)</button>`}
+        <input type="file" id="fanexo" accept="image/*,application/pdf" hidden>
+        ${camposIR("f", f.tipo, f.ir, f.ir_pessoa, f.ir_pessoaNova)}
+      </div>
       <div class="err" id="ferr"></div>
       <div class="btns">
         <button class="btn" type="submit">${ed ? "Salvar alterações" : "Salvar lançamento"}</button>
@@ -394,6 +561,9 @@
     f.valor = $("#fv").value; f.grupo = $("#fg").value; f.item = $("#fi").value;
     f.data = $("#fd").value; f.meio = $("#fm").value; f.obs = $("#fo").value;
     f.grupoNovo = $("#fgn") ? $("#fgn").value : f.grupoNovo; f.itemNovo = $("#fin") ? $("#fin").value : f.itemNovo;
+    if ($("#fir")) f.ir = $("#fir").checked;
+    if ($("#firp")) f.ir_pessoa = $("#firp").value;
+    if ($("#firn")) f.ir_pessoaNova = $("#firn").value;
   }
   function ligarForm() {
     const form = $("#flanc");
@@ -402,8 +572,12 @@
       if (st.form.tipo.startsWith("beneficio") && !["Cartão Ticket", "Ticket Restaurante", "Sodexo"].includes(st.form.meio)) st.form.meio = "Cartão Ticket";
       render();
     }));
-    $("#fg").addEventListener("change", () => { lerForm(); st.form.item = st.form.grupo === OUTRO ? OUTRO : ""; render(); const n = $("#fgn"); if (n) n.focus(); });
-    $("#fi").addEventListener("change", () => { lerForm(); if (st.form.tipo === "boleto" || st.form.item === OUTRO || $("#fin")) { render(); const n = $("#fin"); if (n) n.focus(); } });
+    const reSugerir = () => { if (!st.form.irManual) st.form.ir = undefined; };
+    $("#fg").addEventListener("change", () => { lerForm(); st.form.item = st.form.grupo === OUTRO ? OUTRO : ""; reSugerir(); render(); const n = $("#fgn"); if (n) n.focus(); });
+    $("#fi").addEventListener("change", () => { lerForm(); reSugerir(); render(); const n = $("#fin"); if (n) n.focus(); });
+    const fir = $("#fir"); if (fir) fir.addEventListener("change", () => { lerForm(); st.form.irManual = true; render(); });
+    const firp = $("#firp"); if (firp) firp.addEventListener("change", () => { lerForm(); render(); const n = $("#firn"); if (n) n.focus(); });
+    const fan = $("#fanexo"); if (fan) fan.addEventListener("change", () => { const a = fan.files[0]; fan.value = ""; if (!a) return; lerForm(); st.form.arquivo = a; st.form.removerAnexo = false; render(); });
     form.addEventListener("submit", async ev => {
       ev.preventDefault(); lerForm();
       const f = st.form; const v = parseValor(f.valor);
@@ -415,8 +589,14 @@
       if (!grupo) { $("#ferr").textContent = "Digite o nome do cartão / benefício."; return; }
       if (!item) { $("#ferr").textContent = "Digite o nome do item."; return; }
       const reg = { data: f.data, tipo: f.tipo, grupo, item, valor: v, meio: f.meio, obs: f.obs.trim() || null };
+      reg.ir = f.tipo === "despesa" && !!f.ir;
+      reg.ir_pessoa = reg.ir ? (f.ir_pessoa === OUTRA_PESSOA ? (f.ir_pessoaNova || "").trim() : (f.ir_pessoa || pessoaPadrao())) : null;
+      if (reg.ir && !reg.ir_pessoa) { $("#ferr").textContent = "Digite o nome da pessoa do Imposto de Renda."; return; }
       const b = form.querySelector("[type=submit]"); b.disabled = true; b.innerHTML = '<span class="spin"></span>';
+      let antigo = null;
       try {
+        if (f.arquivo) { b.innerHTML = '<span class="spin"></span> Enviando a nota…'; Object.assign(reg, await enviarNota(f.arquivo, f.data, item)); antigo = st.editando && st.editando.anexo; }
+        else if (f.removerAnexo && st.editando) { reg.anexo = null; reg.anexo_nome = null; antigo = st.editando.anexo; }
         if (st.editando) {
           await api("lancamentos?id=eq." + st.editando.id, { method: "PATCH", body: reg });
           if (st.editando.fatura && reg.tipo === "despesa" && (grupo !== st.editando.grupo || item !== st.editando.item))
@@ -430,6 +610,7 @@
           const [y, m] = f.data.split("-").map(Number); st.ano = y; st.mes = m;
           st.form = Object.assign(formPadrao(), { tipo: f.tipo, grupo, meio: f.meio, data: f.data });
         }
+        if (antigo) apagarNotas([antigo]);
         await recarregar(true);
       } catch (e) { $("#ferr").textContent = "Não foi possível salvar: " + e.message; b.disabled = false; b.textContent = "Tentar de novo"; }
     });
@@ -439,13 +620,15 @@
     if (!st.editando || !confirm("Excluir este lançamento? Essa ação não pode ser desfeita.")) return;
     try {
       await api("lancamentos?id=eq." + st.editando.id, { method: "DELETE" });
+      if (st.editando.anexo) apagarNotas([st.editando.anexo]);
       toast("Lançamento excluído"); st.editando = null; st.form = null; st.tab = "lista"; await recarregar(true);
     } catch (e) { toast("Erro: " + e.message); }
   }
   function abrirEdicao(id) {
     const l = dados.lanc.find(x => String(x.id) === String(id)); if (!l) return;
     st.editando = l;
-    st.form = { tipo: l.tipo, grupo: l.grupo, item: l.item, valor: fmtValorInput(l.valor), data: l.data, meio: l.meio || "Outro", obs: l.obs || "" };
+    st.form = { tipo: l.tipo, grupo: l.grupo, item: l.item, valor: fmtValorInput(l.valor), data: l.data, meio: l.meio || "Outro", obs: l.obs || "",
+      ir: !!l.ir, irManual: true, ir_pessoa: l.ir_pessoa || undefined, anexo: l.anexo || null, anexo_nome: l.anexo_nome || null };
     st.tab = "lancar"; render(); window.scrollTo(0, 0);
   }
 
@@ -473,7 +656,7 @@
       const letra = { receita: "R", despesa: "D", boleto: "B", beneficio_credito: "V", beneficio_gasto: "V" }[l.tipo];
       html += `<button class="tx" data-edit="${l.id}">
         <span class="dot ${l.tipo}">${letra}</span>
-        <span><div class="t1">${esc(l.item)}</div><div class="t2">${esc(l.grupo)} · ${esc(l.meio || "—")} · ${esc(l.usuario || "—")}${l.obs ? " · " + esc(l.obs) : ""}</div></span>
+        <span><div class="t1">${esc(l.item)}${l.anexo ? " 📎" : ""}${l.ir ? ' <span class="irtag">IR</span>' : ""}</div><div class="t2">${esc(l.grupo)} · ${esc(l.meio || "—")} · ${esc(l.usuario || "—")}${l.obs ? " · " + esc(l.obs) : ""}</div></span>
         <span class="v num ${cls}">${sinal} ${money(l.valor)}</span>
       </button>`;
     }
@@ -581,7 +764,7 @@
       pedir.depois();
       const r = window.Fatura.ler(paginas);
       aguarde.remove();
-      if (r.tipo === "conta") abrirConta(r); else if (r.tipo === "cupom" || r.tipo === "nfe") abrirCupom(r); else abrirRevisao(r);
+      if (r.tipo === "conta") abrirConta(r, file); else if (r.tipo === "cupom" || r.tipo === "nfe") abrirCupom(r, file); else abrirRevisao(r);
     } catch (e) {
       aguarde.remove();
       const txt = String((e && (e.name + " " + e.message)) || e);
@@ -666,7 +849,7 @@
   }
 
   // conta de luz/água: vira um lançamento só, substituindo o do mês se já existir
-  function abrirConta(r) {
+  function abrirConta(r, file) {
     const doMesConta = iso => { const [y, m] = iso.split("-").map(Number); return doMes(y, m); };
     const candidatos = iso => doMesConta(iso).filter(l => l.tipo === "despesa" && !l.fatura && l.grupo === r.grupo && l.item === r.item)
       .concat(dados.lanc.filter(l => String(l.obs || "").startsWith(r.chave)))
@@ -682,6 +865,7 @@
         <div class="field"><label>Pagamento</label><select id="cm">${MEIOS.map(x => `<option ${x === (r.debito ? "Débito Automático" : "Boleto") ? "selected" : ""}>${x}</option>`).join("")}</select></div>
       </div>
       <p class="muted small" style="margin-top:-4px">Entra no mês do vencimento. Se preferir no mês de referência (${esc(r.ref)}), mude a data.</p>
+      <label class="linha"><input type="checkbox" id="cguardar" checked> 📎 Guardar este PDF junto do lançamento</label>
       <div id="csub"></div>
       <div class="btns two" style="margin-top:12px"><button class="btn ghost" data-x="fechar">Cancelar</button><button class="btn" data-x="ok">Salvar</button></div>`, true);
     const subs = () => {
@@ -699,8 +883,12 @@
       const remover = $$("[data-sub]:checked", bg).map(c => c.dataset.sub);
       x.disabled = true; x.innerHTML = '<span class="spin"></span>';
       try {
+        if (file && $("#cguardar", bg).checked) Object.assign(reg, await enviarNota(file, data, r.chave));
         await api("lancamentos", { method: "POST", body: reg, headers: { Prefer: "return=minimal" } });
-        if (remover.length) await api("lancamentos?id=in.(" + remover.join(",") + ")", { method: "DELETE" });
+        if (remover.length) {
+          apagarNotas(dados.lanc.filter(l => remover.includes(String(l.id))).map(l => l.anexo));
+          await api("lancamentos?id=in.(" + remover.join(",") + ")", { method: "DELETE" });
+        }
         bg.remove();
         const [y, m] = data.split("-").map(Number); st.ano = y; st.mes = m; st.tab = "lista"; st.filtro = "todos";
         toast(`${item} de ${money(v)} salva`);
@@ -710,7 +898,7 @@
   }
 
   // cupom fiscal eletrônico (NFC-e): um lançamento com o total, na categoria da loja
-  function abrirCupom(r) {
+  function abrirCupom(r, file) {
     let c = window.Fatura.classificar({ desc: r.emitente }, (dados && dados.regras) || {});
     if (c.origem === "palpite" && r.itens.length) { const ci = window.Fatura.classificar({ desc: r.itens[0].texto || r.itens[0].desc }, (dados && dados.regras) || {}); if (ci.origem !== "palpite") c = ci; }
     const f = r.forma.toLowerCase();
@@ -730,6 +918,8 @@
         <div class="field"><label>Pago com</label><select id="um">${opcoesPago.map(x => `<option ${x === meioPadrao ? "selected" : ""}>${x}</option>`).join("")}</select></div>
       </div>
       <div id="uaviso"></div>
+      <label class="linha"><input type="checkbox" id="uguardar" checked> 📎 Guardar este PDF junto do lançamento</label>
+      <div id="uirbox">${camposIR("u", "despesa", irSugerido("despesa", c.grupo, c.item), pessoaPadrao())}</div>
       ${ja.length ? `<div class="alert">Esse cupom já foi lançado. Ao salvar, o lançamento anterior será substituído.</div>` : ""}
       <div class="btns two" style="margin-top:12px"><button class="btn ghost" data-x="fechar">Cancelar</button><button class="btn" data-x="ok">Salvar</button></div>`, true);
     const aviso = () => {
@@ -738,6 +928,19 @@
         : /^Ticket/.test(m) ? `<p class="muted small">Vai entrar como gasto do benefício (${esc(m)}), descontando do saldo do ticket.</p>` : "";
     };
     aviso(); $("#um", bg).addEventListener("change", aviso);
+    let irManual = false;
+    const redesenharIR = () => {
+      const ticket = /^Ticket/.test($("#um", bg).value);
+      const [g, i] = $("#uc", bg).value.split("|");
+      const atual = $("#uir", bg);
+      const marcado = irManual && atual ? atual.checked : irSugerido("despesa", g, i);
+      const pessoa = $("#uirp", bg) ? $("#uirp", bg).value : pessoaPadrao();
+      $("#uirbox", bg).innerHTML = ticket ? "" : camposIR("u", "despesa", marcado, pessoa, ($("#uirn", bg) || {}).value);
+    };
+    bg.addEventListener("change", ev => {
+      if (ev.target.id === "uir") { irManual = true; redesenharIR(); }
+      else if (ev.target.id === "uirp" || ev.target.id === "um" || (ev.target.id === "uc" && !irManual)) redesenharIR();
+    });
     bg.addEventListener("click", async ev => {
       const x = ev.target.closest('[data-x="ok"]'); if (!x) return;
       const v = parseValor($("#uv", bg).value); const data = $("#ud", bg).value; const pago = $("#um", bg).value;
@@ -749,11 +952,17 @@
         const lista = TIPOS.beneficio_gasto.grupos[pago] || ["Outros"];
         const it = lista.includes(item) ? item : item === "Restaurantes" && lista.includes("Restaurante") ? "Restaurante" : "Outros";
         reg = { data, tipo: "beneficio_gasto", grupo: pago, item: it, valor: v, meio: "Cartão Ticket", usuario: nomeUsuario(), obs };
-      } else reg = { data, tipo: "despesa", grupo, item, valor: v, meio: pago, usuario: nomeUsuario(), obs };
+      } else {
+        reg = { data, tipo: "despesa", grupo, item, valor: v, meio: pago, usuario: nomeUsuario(), obs };
+        const irBox = $("#uir", bg);
+        reg.ir = !!(irBox && irBox.checked); reg.ir_pessoa = reg.ir ? lerPessoa("u", bg) : null;
+        if (reg.ir && !reg.ir_pessoa) { toast("Digite o nome da pessoa do IR"); return; }
+      }
       x.disabled = true; x.innerHTML = '<span class="spin"></span>';
       try {
+        if (file && $("#uguardar", bg).checked) Object.assign(reg, await enviarNota(file, data, r.emitente));
         await api("lancamentos", { method: "POST", body: reg, headers: { Prefer: "return=minimal" } });
-        if (ja.length) await api("lancamentos?id=in.(" + ja.map(l => l.id).join(",") + ")", { method: "DELETE" });
+        if (ja.length) { apagarNotas(ja.map(l => l.anexo)); await api("lancamentos?id=in.(" + ja.map(l => l.id).join(",") + ")", { method: "DELETE" }); }
         if (reg.tipo === "despesa" && $("#uc", bg).value !== c.grupo + "|" + c.item) aprender([{ desc: r.emitente, grupo, item }]).catch(() => {});
         bg.remove();
         const [y, m] = data.split("-").map(Number); st.ano = y; st.mes = m; st.tab = "lista"; st.filtro = "todos";
@@ -781,7 +990,7 @@
     const lin = itens.slice().sort((a, b) => a.id - b.id).map(l => {
       const compra = (String(l.obs || "").match(/compra (\d{2}\/\d{2})/) || [])[1];
       return `<button class="tx mini" data-edit="${l.id}">
-        <span><div class="t1">${esc(descDaObs(l.obs) || l.item)}</div><div class="t2">${esc(l.grupo)} › ${esc(l.item)}${compra ? " · " + compra : ""}</div></span>
+        <span><div class="t1">${esc(descDaObs(l.obs) || l.item)}${l.ir ? ' <span class="irtag">IR</span>' : ""}</div><div class="t2">${esc(l.grupo)} › ${esc(l.item)}${compra ? " · " + compra : ""}</div></span>
         <span class="v num ${l.valor < 0 ? "pos" : "neg"}">${l.valor < 0 ? "+ " + money(-l.valor) : "− " + money(l.valor)}</span></button>`;
     }).join("");
     return `<div class="fat ${st.abertos["f:" + key] ? "open" : ""}">
@@ -870,11 +1079,19 @@
         <div class="alvo">Valor-alvo: <input inputmode="decimal" data-alvo="${it}" value="${alvo ? fmtValorInput(alvo) : ""}" placeholder="definir"> ${alvo ? pct(g / alvo) : ""}</div></div>`;
     }).join("")}</div>`;
 
+    const irAno = dados.lanc.filter(l => l.data.startsWith(String(y)) && l.ir);
+    const notasAno = dados.lanc.filter(l => l.data.startsWith(String(y)) && l.anexo).length;
+    const porPessoa = {}; irAno.forEach(l => { const p = l.ir_pessoa || "Sem nome"; porPessoa[p] = porPessoa[p] || { v: 0, n: 0, sem: 0 }; porPessoa[p].v += l.valor; porPessoa[p].n++; if (!l.anexo) porPessoa[p].sem++; });
+    const irCard = `<div class="card"><h2>Imposto de Renda ${y} <span class="hint">· despesas marcadas como dedutíveis</span></h2>
+      ${Object.keys(porPessoa).length ? Object.entries(porPessoa).map(([p, o]) => `<div class="kv"><span>${esc(p)} <span class="muted small">· ${o.n} despesa(s)${o.sem ? ` · <b class="neg">${o.sem} sem nota</b>` : ""}</span></span><span class="num"><b>${money(o.v)}</b></span></div>`).join("")
+        : `<p class="muted small">Nenhuma despesa marcada como dedutível ainda. Ao lançar consulta, dentista, exame, plano de saúde ou escola, marque "Dedutível no Imposto de Renda" e anexe a nota.</p>`}
+      <p class="muted small" style="margin:8px 0">${notasAno} nota(s) guardada(s) em ${y}. Farmácia e cursos livres normalmente não são dedutíveis; quem confirma é o contador.</p>
+      <div class="btns"><button class="btn" data-act="zip-ir" ${irAno.length || notasAno ? "" : "disabled"}>📦 Baixar notas de ${y} para o contador (.zip)</button></div></div>`;
     const exp = `<div class="card"><h2>Exportar</h2><div class="btns">
       <button class="btn ghost" data-act="csv-grade">Baixar planilha do ano</button>
       <button class="btn ghost" data-act="csv-lanc">Baixar todos os lançamentos de ${y}</button></div>
       <p class="muted small" style="margin:8px 0 0">Os arquivos abrem no Excel e no Google Planilhas.</p></div>`;
-    return nav + chart + faixasAno + tabela + tabCat + como + metas + exp;
+    return nav + chart + faixasAno + tabela + tabCat + como + metas + irCard + exp;
   }
   function ligarAno() {
     $$("[data-alvo]").forEach(inp => inp.addEventListener("change", async () => {
@@ -960,6 +1177,10 @@
       else if (a === "copiar") abrirCopia();
       else if (a === "importar") { const i = $("#fpdf"); if (i) i.click(); }
       else if (a === "excluir-fatura") excluirFatura(b.dataset.key);
+      else if (a === "anexar") { const i = $("#fanexo"); if (i) i.click(); }
+      else if (a === "ver-nota") { const f = st.form; if (f.arquivo) verNota(f.arquivo, f.arquivo.name); else if (f.anexo) verNota(f.anexo, f.anexo_nome); }
+      else if (a === "tirar-nota") { lerForm(); if (st.form.arquivo) st.form.arquivo = null; else st.form.removerAnexo = true; render(); }
+      else if (a === "zip-ir") pacoteIR(st.ano);
       else if (a === "csv-grade") exportarGrade();
       else if (a === "csv-lanc") exportarLanc();
     }));
