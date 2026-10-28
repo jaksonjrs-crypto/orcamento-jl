@@ -772,9 +772,11 @@
       </button>`;
     }
     html += `<div class="btns" style="margin-top:16px">
+      <button class="btn" data-act="escanear">📷 Escanear cupom</button>
       <button class="btn ghost" data-act="importar">📄 Importar PDF ou foto do cupom</button>
       <button class="btn ghost" data-act="copiar">Copiar lançamentos do mês anterior</button></div>
-      <input type="file" id="fpdf" accept="application/pdf,.pdf,image/*" hidden>`;
+      <input type="file" id="fpdf" accept="application/pdf,.pdf,image/*" hidden>
+      <input type="file" id="fcam" accept="image/*" capture="environment" hidden>`;
     return html;
   }
   function abrirCopia() {
@@ -1020,13 +1022,82 @@
     try { const r = await fetch("https://brasilapi.com.br/api/cnpj/v1/" + cnpj); return r.ok ? await r.json() : null; } catch (e) { return null; }
   }
   const tituloCaso = s => String(s || "").toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase()).replace(/\b(Ltda|S\/a|S\.a\.?|Me|Eireli|Epp)\b\.?/gi, "").replace(/\s+/g, " ").trim();
-  async function importarFoto(file) {
+  // ---------- ESCANEAR: câmera ao vivo, acha o QR sozinho e tira a foto ----------
+  async function abrirScanner() {
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) { const i = $("#fcam"); if (i) i.click(); return; }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    } catch (e) {
+      toast("Não consegui abrir a câmera aqui. Abrindo a câmera do celular…");
+      const i = $("#fcam"); if (i) i.click(); return;
+    }
+    const bg = document.createElement("div"); bg.className = "scan-bg";
+    bg.innerHTML = `<video playsinline muted autoplay></video>
+      <div class="scan-moldura"></div>
+      <div class="scan-topo"><span id="scst">Aponte para o cupom inteiro, com o QR code aparecendo</span></div>
+      <div class="scan-base">
+        <button class="btn ghost" data-s="fechar">Cancelar</button>
+        <button class="scan-disparo" data-s="foto" aria-label="Tirar foto"></button>
+        <button class="btn ghost" data-s="luz" hidden>🔦 Luz</button>
+      </div>`;
+    document.body.appendChild(bg);
+    const video = $("video", bg); video.srcObject = stream;
+    const track = stream.getVideoTracks()[0];
+    let luz = false, qr = null, parar = false, ultimo = 0;
+    try { const cap = track.getCapabilities ? track.getCapabilities() : {}; if (cap.torch) $('[data-s="luz"]', bg).hidden = false; } catch (e) { /* sem lanterna */ }
+    const fechar = () => { parar = true; stream.getTracks().forEach(t => t.stop()); bg.remove(); };
+    let det = null;
+    try { if ("BarcodeDetector" in window) det = new window.BarcodeDetector({ formats: ["qr_code"] }); } catch (e) { det = null; }
+    if (!det) carregarScript(CDN_QR).catch(() => {});
+    const aux = document.createElement("canvas");
+    const procurar = async () => {
+      if (parar) return;
+      if (!qr && video.readyState >= 2 && Date.now() - ultimo > 350) {
+        ultimo = Date.now();
+        try {
+          let v = null;
+          if (det) { const r = await det.detect(video); if (r && r.length) v = r[0].rawValue; }
+          else if (window.jsQR) {
+            const e = Math.min(1, 900 / video.videoWidth); aux.width = video.videoWidth * e | 0; aux.height = video.videoHeight * e | 0;
+            const cx = aux.getContext("2d", { willReadFrequently: true }); cx.drawImage(video, 0, 0, aux.width, aux.height);
+            const q = window.jsQR(cx.getImageData(0, 0, aux.width, aux.height).data, aux.width, aux.height); if (q && q.data) v = q.data;
+          }
+          if (v) {
+            qr = v; bg.classList.add("achou");
+            $("#scst", bg).textContent = "✓ QR code lido! Agora tire a foto do cupom inteiro";
+            if (navigator.vibrate) navigator.vibrate(80);
+          }
+        } catch (e) { /* tenta no próximo quadro */ }
+      }
+      requestAnimationFrame(procurar);
+    };
+    video.addEventListener("loadeddata", () => requestAnimationFrame(procurar), { once: true });
+    bg.addEventListener("click", async ev => {
+      const b = ev.target.closest("[data-s]"); if (!b) return;
+      if (b.dataset.s === "fechar") fechar();
+      else if (b.dataset.s === "luz") { luz = !luz; try { await track.applyConstraints({ advanced: [{ torch: luz }] }); } catch (e) { toast("Lanterna indisponível"); } }
+      else if (b.dataset.s === "foto") {
+        if (!video.videoWidth) return;
+        let blob = null;
+        try { if ("ImageCapture" in window) blob = await new window.ImageCapture(track).takePhoto(); } catch (e) { blob = null; }
+        if (!blob) {
+          const c = document.createElement("canvas"); c.width = video.videoWidth; c.height = video.videoHeight;
+          c.getContext("2d").drawImage(video, 0, 0); blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.92));
+        }
+        fechar();
+        importarFoto(new File([blob], `cupom-${hojeISO()}.jpg`, { type: "image/jpeg" }), qr);
+      }
+    });
+  }
+
+  async function importarFoto(file, qrJaLido) {
     const bg = abrirFolha(`<h3>🧾 Lendo a foto do cupom</h3><div class="empty" id="fp"><span class="spin"></span> Procurando o QR code…</div>
       <p class="muted small">A leitura é feita aqui no celular. Na primeira vez ele baixa o leitor (alguns MB).</p>`);
     const prog = t => { const el = $("#fp", bg); if (el) el.innerHTML = `<span class="spin"></span> ${esc(t)}`; };
     let worker = null;
     try {
-      const qr = await lerQR(file);
+      const qr = qrJaLido || await lerQR(file);
       prog("Preparando a foto…");
       await carregarScript(CDN_OCR);
       const canvas = pretoEBranco(await fotoParaCanvas(file, 1600));
@@ -1415,6 +1486,7 @@
       else if (a === "excluir") excluirAtual();
       else if (a === "copiar") abrirCopia();
       else if (a === "importar") { const i = $("#fpdf"); if (i) i.click(); }
+      else if (a === "escanear") abrirScanner();
       else if (a === "excluir-fatura") excluirFatura(b.dataset.key);
       else if (a === "anexar") { const i = $("#fanexo"); if (i) i.click(); }
       else if (a === "ler-foto") { const f = st.form; if (f && f.arquivo) importarFoto(f.arquivo); }
@@ -1442,6 +1514,7 @@
     $$("[data-edit]").forEach(b => b.addEventListener("click", () => abrirEdicao(b.dataset.edit)));
     $$("[data-fat]").forEach(b => b.addEventListener("click", () => { const k = "f:" + b.dataset.fat; st.abertos[k] = !st.abertos[k]; render(); }));
     const fp = $("#fpdf"); if (fp) fp.addEventListener("change", () => { const f = fp.files[0]; fp.value = ""; if (f) importarFatura(f); });
+    const fc = $("#fcam"); if (fc) fc.addEventListener("change", () => { const f = fc.files[0]; fc.value = ""; if (f) importarFoto(f); });
   }
 
   // atualiza ao voltar para o app (para ver o que o outro lançou)

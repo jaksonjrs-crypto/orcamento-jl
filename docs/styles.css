@@ -289,3 +289,16 @@ table.grid tr.tot td { font-weight: 800; }
 .irlinha { margin-top: 8px; font-weight: 600; font-size: 14px; }
 .irtag { display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: .04em; color: var(--boleto); background: var(--boleto-soft); border-radius: 6px; padding: 1px 5px; vertical-align: 1px; }
 a.btn { text-align: center; text-decoration: none; }
+
+/* scanner do cupom (câmera ao vivo) */
+.scan-bg { position: fixed; inset: 0; z-index: 40; background: #000; }
+.scan-bg video { position: absolute; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 64px); bottom: calc(env(safe-area-inset-bottom) + 112px); width: 100%; height: auto; max-height: calc(100% - 176px); margin: auto; object-fit: contain; }
+.scan-moldura { position: absolute; left: 8px; right: 8px; top: calc(env(safe-area-inset-top) + 58px); bottom: calc(env(safe-area-inset-bottom) + 106px); border: 3px solid rgba(255,255,255,.5); border-radius: 14px; pointer-events: none; transition: border-color .2s; }
+.scan-bg.achou .scan-moldura { border-color: #34c759; }
+.scan-topo { position: absolute; top: 0; left: 0; right: 0; padding: calc(env(safe-area-inset-top) + 14px) 16px 10px; text-align: center; color: #fff; font-size: 15px; }
+.scan-bg.achou .scan-topo { color: #b9f6ca; font-weight: 600; }
+.scan-base { position: absolute; left: 0; right: 0; bottom: 0; padding: 16px 16px calc(env(safe-area-inset-bottom) + 22px); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.scan-base .btn { background: rgba(0,0,0,.5); color: #fff; border-color: rgba(255,255,255,.4); min-width: 92px; }
+.scan-disparo { width: 74px; height: 74px; border-radius: 50%; border: 5px solid #fff; background: rgba(255,255,255,.25); flex: none; }
+.scan-bg.achou .scan-disparo { background: #34c759; }
+.scan-disparo:active { transform: scale(.92); }
