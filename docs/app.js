@@ -436,6 +436,13 @@
     for (const p of pessoasIR()) if (n.split(" ")[0] === semAcento(p).split(" ")[0]) return p;
     return null;
   }
+  // quem foi atendido: nome de alguém da família citado na descrição (ex.: "consulta de Letícia…") vale mais que o pagador
+  function pessoaDoDoc(r) {
+    const t = " " + semAcento([r.servico, (r.itens || []).map(i => i.texto || i.desc).join(" ")].join(" ")).replace(/[^A-Z ]/g, " ").replace(/\s+/g, " ") + " ";
+    for (const p of (dados && dados.pessoas) || []) if (p.nome_completo && t.includes(" " + semAcento(p.nome_completo) + " ")) return p.nome;
+    for (const p of pessoasIR()) if (t.includes(" " + semAcento(p).split(" ")[0] + " ")) return p;
+    return pessoaDoNome(r.tomador);
+  }
   // classificação de nota/recibo: regra aprendida > loja > produto > área do serviço (saúde/educação)
   function classificarDoc(r) {
     const regras = (dados && dados.regras) || {};
@@ -465,6 +472,7 @@
     if (tipo !== "despesa") return "";
     const ps = pessoasIR(); if (pessoa && pessoa !== OUTRA_PESSOA && !ps.includes(pessoa)) ps.push(pessoa);
     return `<label class="linha irlinha"><input type="checkbox" id="${pref}ir" ${ir ? "checked" : ""}> Dedutível no Imposto de Renda</label>
+      <p class="muted small" style="margin:-2px 0 6px 26px">O app marca sozinho o que costuma ser dedutível. Na dúvida, deixe marcado: o contador confirma.</p>
       ${ir ? `<div class="field"><label for="${pref}irp">Para quem</label><select id="${pref}irp">${ps.concat(OUTRA_PESSOA).map(p => `<option ${p === (pessoa || pessoaPadrao()) ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></div>
       ${pessoa === OUTRA_PESSOA ? `<div class="field"><label for="${pref}irn">Nome</label><input id="${pref}irn" maxlength="30" placeholder="Ex.: nome do filho" value="${esc(pessoaNova || "")}"></div>` : ""}` : ""}`;
   }
@@ -690,7 +698,7 @@
     if (r.tipo === "comprovante" && slot === "anexo") { f.compArq = file; f.arquivo = null; slot = "comprovante"; }
     else if (r.tipo !== "comprovante" && slot === "comprovante") { f.arquivo = file; f.compArq = null; slot = "anexo"; }
     if (r.area === "saude" || r.area === "educacao") { f.ir = true; f.irManual = true; }
-    const quem = pessoaDoNome(r.tomador); if (quem) f.ir_pessoa = quem;
+    const quem = pessoaDoDoc(r); if (quem) f.ir_pessoa = quem;
     if (st.editando) { if (st.tab === "lancar") render(); toast(slot === "comprovante" ? "Comprovante anexado" : "Nota anexada"); return; }
     const valor = r.tipo === "conta" ? r.valor : r.total;
     // o valor que conta no orçamento é o que foi pago: o comprovante manda; a nota só preenche se não houver comprovante
@@ -702,7 +710,10 @@
     else if (r.tipo !== "comprovante" || !f.arquivo) { const c = classificarDoc(r); f.grupo = c.grupo; f.item = c.item; }
     if (!f.irManual) f.ir = undefined;
     if (!f.obs) f.obs = [r.chave, r.detalhe || r.servico].filter(Boolean).join(" · ").slice(0, 140);
-    if (r.tipo !== "conta") { const cj = candidatosJuntar(r, slot); f.sugestaoJuntar = cj.length ? cj[0].id : null; }
+    if (r.tipo !== "conta") {
+      const mesma = dados.lanc.find(l => r.chave && String(l.obs || "").includes(r.chave));
+      const cj = candidatosJuntar(r, slot); f.sugestaoJuntar = mesma ? mesma.id : cj.length ? cj[0].id : null;
+    }
     if (st.tab === "lancar") render();
     toast(slot === "comprovante" ? `Li o comprovante: ${money(valor)} pagos` : "Li a nota: confira valor, data e categoria");
   }
@@ -1006,7 +1017,7 @@
     const ja = dados.lanc.filter(l => String(l.obs || "").includes(r.chave));
     const juntar = candidatosJuntar(r, slot).filter(l => !ja.some(j => j.id === l.id));
     const irPadrao = irSugerido("despesa", c.grupo, c.item) || r.area === "saude" || r.area === "educacao" || juntar.some(l => l.ir);
-    const quem = pessoaDoNome(r.tomador) || (juntar.find(l => l.ir_pessoa) || {}).ir_pessoa || pessoaPadrao();
+    const quem = pessoaDoDoc(r) || (juntar.find(l => l.ir_pessoa) || {}).ir_pessoa || pessoaPadrao();
     const bg = abrirFolha(`
       <h3>${slot === "comprovante" ? "🧾" : "📄"} ${esc(r.emitente)}</h3>
       <p class="muted small">${ROTULO[r.tipo] || "Documento"} ${esc(r.numero ? "nº " + r.numero : "")} · ${esc(r.data)}${r.forma ? " · pago com: " + esc(r.forma) : ""}${r.tomador ? " · em nome de " + esc(r.tomador) : ""}</p>
@@ -1090,7 +1101,7 @@
         if (reg.tipo === "despesa" && $("#uc", bg).value !== c.grupo + "|" + c.item) aprender([{ desc: r.emitente, grupo, item }]).catch(() => {});
         bg.remove();
         const [y, m] = data.split("-").map(Number); st.ano = y; st.mes = m; st.tab = "lista"; st.filtro = "todos";
-        toast(alvo ? `${slot === "comprovante" ? "Comprovante guardado" : "Nota guardada"} em “${alvo.item}”` : `${ROTULO[r.tipo] || "Documento"} de ${money(v)} salvo`);
+        toast(alvo ? `${slot === "comprovante" ? "Comprovante guardado" : "Nota guardada"} em “${alvo.item}”` : `Lançamento de ${money(v)} salvo`);
         await recarregar(true); window.scrollTo(0, 0);
       } catch (e) { toast("Erro ao salvar: " + e.message); x.disabled = false; x.textContent = "Tentar de novo"; }
     });

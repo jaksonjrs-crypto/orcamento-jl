@@ -287,6 +287,31 @@
       itens: servico ? [{ desc: servico, valor: total }] : [] };
   }
 
+  // NFS-e municipal tipo Montes Claros (cabeçalho do prestador + "TOMADOR DO SERVIÇO")
+  function lerNFSeTomador(paginas) {
+    const ls = paginas.flatMap(p => linhas(p.itens));
+    const txt = ls.join("\n");
+    const apos = (re, reV, max) => { const i = ls.findIndex(l => re.test(l)); if (i < 0) return ""; for (const l of ls.slice(i + 1, i + 1 + (max || 6))) if (!reV || reV.test(l)) return l; return ""; };
+    const recebi = apos(/^Recebi\(?e?m?o?s?\)? de/i, /[A-Za-z]{3}/);
+    const emitente = (recebi || ls.find(l => /[A-Z]{3}/.test(l) && !/Nota Fiscal/i.test(l)) || "").replace(/\s{2,}.*$/, "").trim();
+    const numero = ((apos(/N[úu]mero da NFS-?e/i, /\d{6,}/) || "").match(/\d{6,}/) || [""])[0];
+    const data = ((txt.match(/Data do Servi[çc]o[\s\S]{0,160}?(\d{2}\/\d{2}\/\d{4})/i) || txt.match(/Dt\.? de Emiss[ãa]o[\s\S]{0,200}?(\d{2}\/\d{2}\/\d{4})/i) || [])[1]);
+    const tomador = (apos(/^Nome \/ Raz[ãa]o Social/i, /[A-Za-z]{3}/) || "").replace(/\s{2,}.*$/, "").trim();
+    const id = ls.findIndex(l => /DESCRI[ÇC][ÃA]O DOS SERVI[ÇC]OS/i.test(l));
+    const servico = id >= 0 ? ls.slice(id + 1, id + 8).filter(l => !/^C[óo]digo do Servi/i.test(l)).slice(0, 4).join(" ")
+      .split(/C[óo]digo do Servi/i)[0].replace(/\s+[\d.]+,\d{2}(\s+[\d.]+,\d{2})*/g, " ").replace(/\s+/g, " ").trim() : "";
+    const codigo = (txt.match(/\b(\d{2}\.\d{2}(?:\.\d{2})?)\s*-\s*[A-Za-zÀ-ú]/) || [])[1] || "";
+    const total = num((txt.match(/Valor L[íi]quido da NFS-?e\s+([\d.]+,\d{2})/i) || txt.match(/Valor Total da NFS-?e\s+([\d.]+,\d{2})/i) || [])[1] || "NaN");
+    if (!data || !isFinite(total)) throw new Error("Não encontrei a data ou o valor na nota de serviço.");
+    const nome = emitente.replace(/\s+\d{6,}$/, "").replace(/\b(Ltda|S\/S|S\.?A\.?|ME|Eireli|EPP)\b\.?/gi, "").replace(/\s+/g, " ").trim();
+    const area = /^04\./.test(codigo) ? "saude" : /^08\./.test(codigo) ? "educacao" : "";
+    const tom = tomador.replace(/\s+(?:[A-ZÀ-Ú][a-zà-ú]+\s?)+\/[A-Z]{2}$/, "").trim();
+    const serv = servico.split(/\s\d{2}\.\d{2}(?:\.\d{2})?\s*-\s/)[0].replace(/\s(N[ãa]o|Sim)(?=\s)/g, "").replace(/\s+/g, " ").trim();
+    const titulo = nome.toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase());
+    return { tipo: "nfse", emitente: titulo || "Nota de serviço", data, venc: data, total, numero, forma: "", tomador: tom, servico: serv, codigo, area,
+      itens: serv ? [{ desc: serv, valor: total }] : [] };
+  }
+
   // ---------- comprovante de Pix ----------
   function lerComprovantePix(paginas) {
     const ls = paginas.flatMap(p => linhas(p.itens));
@@ -316,6 +341,7 @@
     let r;
     if (/DANFSe|Documento Auxiliar da NFS-?e/i.test(txt)) r = lerNFSe(paginas);
     else if (/Nota Fiscal de\s*Servi[çc]o\s*Eletr[ôo]nica|NFS-?e/i.test(txt) && /Prestador de Servi[çc]o/i.test(txt)) r = lerNFSeMunicipal(paginas);
+    else if (/Nota Fiscal de Servi[çc]os? Eletr[ôo]nica|NFS-?e/i.test(txt) && /TOMADOR DO SERVI[ÇC]O/i.test(txt)) r = lerNFSeTomador(paginas);
     else if (/Comprovante do Pix/i.test(txt) && /Valor pago/i.test(txt)) r = lerComprovantePix(paginas);
     else if (/Nota Fiscal de Consumidor|NFC-?e/i.test(txt) && /Valor (a pagar|total)/i.test(txt)) r = lerNFCe(paginas);
     else if (/DANFE/.test(txt) && /VALOR TOTAL DA NOTA/i.test(txt)) r = lerNFe(paginas);
