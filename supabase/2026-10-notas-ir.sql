@@ -6,6 +6,8 @@ alter table public.lancamentos add column if not exists anexo text;        -- ca
 alter table public.lancamentos add column if not exists anexo_nome text;   -- nome original do arquivo
 alter table public.lancamentos add column if not exists ir boolean not null default false;
 alter table public.lancamentos add column if not exists ir_pessoa text;    -- para quem é a despesa (Lílian, Jakson, ...)
+alter table public.lancamentos add column if not exists comprovante text;       -- comprovante de pagamento (Pix, boleto)
+alter table public.lancamentos add column if not exists comprovante_nome text;
 
 -- 2) pasta PRIVADA "notas" no Storage (só quem tem login acessa; até 10 MB por arquivo)
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
@@ -40,4 +42,4 @@ grant select, insert, update, delete on public.pessoas to authenticated;
 
 select 'ok' as resultado,
   (select public from storage.buckets where id = 'notas') as pasta_publica,
-  (select count(*) from information_schema.columns where table_name = 'lancamentos' and column_name in ('anexo','anexo_nome','ir','ir_pessoa')) as colunas_novas;
+  (select count(*) from information_schema.columns where table_name = 'lancamentos' and column_name in ('anexo','anexo_nome','ir','ir_pessoa','comprovante','comprovante_nome')) as colunas_novas;

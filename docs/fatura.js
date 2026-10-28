@@ -238,6 +238,71 @@
     return { tipo: "nfe", emitente: nome || "Nota fiscal", data, venc: data, total, numero, forma: "", itens };
   }
 
+  // ---------- nota fiscal de serviço (NFS-e, padrão nacional DANFSe) ----------
+  // o DANFSe é uma grade: o valor fica logo abaixo do rótulo, na mesma coluna
+  function abaixo(itens, reRotulo, reValor, n) {
+    const rots = itens.filter(i => reRotulo.test(i.s)).sort((a, b) => a.y - b.y);
+    const r = rots[(n || 1) - 1]; if (!r) return "";
+    const cands = itens.filter(i => i !== r && Math.abs(i.x - r.x) < 4 && i.y > r.y + 1 && i.y < r.y + 45 && (!reValor || reValor.test(i.s))).sort((a, b) => a.y - b.y);
+    return cands.length ? cands[0].s : "";
+  }
+  function lerNFSe(paginas) {
+    const it = paginas[0].itens;
+    const emitente = abaixo(it, /^Nome \/ Nome Empresarial$/i, /[a-z]/, 1);
+    const tomador = abaixo(it, /^Nome \/ Nome Empresarial$/i, /[a-z]/, 2);
+    const numero = abaixo(it, /^N[ÚU]MERO DA NFS-?E$/i, /^\d+$/);
+    const data = (abaixo(it, /^DATA E HORA DA EMISS[ÃA]O DA$/i, /\d{2}\/\d{2}\/\d{4}/) || abaixo(it, /^COMPET[ÊE]NCIA DA NFS-?E$/i, /\d{2}\/\d{2}\/\d{4}/)).slice(0, 10);
+    const v = abaixo(it, /^VALOR L[ÍI]QUIDO DA NFS-?e$/i, /[\d.]+,\d{2}/) || abaixo(it, /^VALOR DA OPERA[ÇC][ÃA]O/i, /[\d.]+,\d{2}/);
+    const total = num((v.match(/[\d.]+,\d{2}/) || [])[0] || "NaN");
+    const codigo = abaixo(it, /^C[óo]digo de Tributa[çc][ãa]o Nacional/i, /^\d{2}\.\d{2}/);
+    const rs = it.filter(i => /^SERVI[ÇC]O PRESTADO$/i.test(i.s))[0];
+    const servico = rs ? (it.filter(i => Math.abs(i.x - rs.x) < 4 && i.y > rs.y + 12 && i.y < rs.y + 40 && /[a-z]{3}/.test(i.s)).sort((a, b) => a.y - b.y)[0] || {}).s || "" : "";
+    if (!data || !isFinite(total)) throw new Error("Não encontrei a data ou o valor na nota de serviço.");
+    const nome = emitente.replace(/\b(Ltda|S\.?A\.?|ME|Eireli|EPP)\b\.?/gi, "").replace(/\s+/g, " ").trim();
+    // lista nacional de serviços: 04 = saúde, 05 = veterinária, 08 = educação
+    const grupoServ = /^04\./.test(codigo) ? "saude" : /^08\./.test(codigo) ? "educacao" : "";
+    return { tipo: "nfse", emitente: nome || "Nota de serviço", data, venc: data, total, numero, forma: "", tomador, servico, codigo, area: grupoServ,
+      itens: servico ? [{ desc: servico, valor: total }] : [] };
+  }
+
+  // NFS-e municipal (ISSNet e similares): rótulos e valores em texto corrido
+  function lerNFSeMunicipal(paginas) {
+    const ls = paginas.flatMap(p => linhas(p.itens));
+    const txt = ls.join("\n");
+    const apos = (re, reV) => { const i = ls.findIndex(l => re.test(l)); if (i < 0) return ""; for (const l of ls.slice(i + 1, i + 6)) if (!reV || reV.test(l)) return l; return ""; };
+    const numero = (apos(/N[úu]mero da Nota Fiscal/i, /^\d+$/) || "").trim();
+    const data = ((apos(/Data de Gera[çc][ãa]o da NFS-?e/i, /\d{2}\/\d{2}\/\d{4}/) || apos(/Data de Compet[êe]ncia/i, /\d{2}\/\d{2}\/\d{4}/) || apos(/Data de Emiss[ãa]o/i, /\d{2}\/\d{2}\/\d{4}/)).match(/\d{2}\/\d{2}\/\d{4}/) || [])[0];
+    const ip = ls.findIndex(l => /Dados do Prestador/i.test(l));
+    const emitente = ip >= 0 ? (ls.slice(ip + 1, ip + 6).find(l => /[a-z]/.test(l) && !/^Data |Compet|Gera[çc]/i.test(l) && !/\d{2}\/\d{2}\/\d{4}/.test(l)) || "") : "";
+    const tomador = ((txt.match(/Raz[ãa]o Social\s*:\s*([^\n]+)/i) || [])[1] || "").replace(/\s{2,}.*$/, "").trim();
+    const servico = (apos(/^Descri[çc][ãa]o dos Servi[çc]os/i, /[a-z]{3}/) || "").trim();
+    const codigo = (txt.match(/\b(\d{2}\.\d{2}\.\d{2})\b/) || [])[1] || "";
+    const vl = apos(/Vl\.?\s*L[íi]quido da Nota/i, /[\d.]+,\d{2}/) || apos(/Vl\.?\s*Total dos Servi[çc]os/i, /[\d.]+,\d{2}/);
+    const vals = (vl.match(/[\d.]+,\d{2}/g) || []);
+    const total = num(/L[íi]quido/i.test(ls.find(l => /Vl\.?\s*L[íi]quido da Nota/i.test(l)) || "") ? vals[vals.length - 1] || "NaN" : vals[0] || "NaN");
+    if (!data || !isFinite(total)) throw new Error("Não encontrei a data ou o valor na nota de serviço.");
+    const nome = emitente.replace(/\s+-\s+/g, " ").replace(/\b(Ltda|S\.?A\.?|ME|Eireli|EPP)\b\.?/gi, "").replace(/\s+/g, " ").trim();
+    const area = /^04\./.test(codigo) ? "saude" : /^08\./.test(codigo) ? "educacao" : "";
+    return { tipo: "nfse", emitente: nome || "Nota de serviço", data, venc: data, total, numero, forma: "", tomador, servico, codigo, area,
+      itens: servico ? [{ desc: servico, valor: total }] : [] };
+  }
+
+  // ---------- comprovante de Pix ----------
+  function lerComprovantePix(paginas) {
+    const ls = paginas.flatMap(p => linhas(p.itens));
+    const depois = re => { const i = ls.findIndex(l => re.test(l)); return i >= 0 ? (ls[i + 1] || "") : ""; };
+    const valor = num(((depois(/^Valor pago$/i) || depois(/^Valor$/i)).match(/[\d.]+,\d{2}/) || [])[0] || "NaN");
+    const original = num(((depois(/^Valor original$/i)).match(/[\d.]+,\d{2}/) || [])[0] || "NaN");
+    const data = ((ls.find(l => /\d{2}\/\d{2}\/\d{4}\s*-\s*\d{2}:\d{2}/.test(l)) || depois(/^Data e hora da transa/i)).match(/\d{2}\/\d{2}\/\d{4}/) || [])[0];
+    const para = depois(/^Para$/i);
+    const de = depois(/^De$/i);
+    const info = depois(/^Informa[çc][ãa]o para o pagador$/i);
+    if (!data || !isFinite(valor)) throw new Error("Não encontrei a data ou o valor no comprovante.");
+    const nome = para.replace(/\b(Ltda|S\.?A\.?|ME|Eireli|EPP)\b\.?/gi, "").replace(/\s+/g, " ").trim();
+    return { tipo: "comprovante", emitente: nome || "Pix", data, venc: data, total: valor, original: isFinite(original) ? original : null,
+      numero: "", forma: "Pix", tomador: de, servico: info, itens: [] };
+  }
+
   // ---------- estornos: um crédito anula uma compra de mesmo valor ----------
   function marcarEstornos(itens) {
     for (const neg of itens.filter(i => i.valor < 0)) {
@@ -249,19 +314,24 @@
   function ler(paginas) {
     const txt = textoCorrido(paginas);
     let r;
-    if (/Nota Fiscal de Consumidor|NFC-?e/i.test(txt) && /Valor (a pagar|total)/i.test(txt)) r = lerNFCe(paginas);
+    if (/DANFSe|Documento Auxiliar da NFS-?e/i.test(txt)) r = lerNFSe(paginas);
+    else if (/Nota Fiscal de\s*Servi[çc]o\s*Eletr[ôo]nica|NFS-?e/i.test(txt) && /Prestador de Servi[çc]o/i.test(txt)) r = lerNFSeMunicipal(paginas);
+    else if (/Comprovante do Pix/i.test(txt) && /Valor pago/i.test(txt)) r = lerComprovantePix(paginas);
+    else if (/Nota Fiscal de Consumidor|NFC-?e/i.test(txt) && /Valor (a pagar|total)/i.test(txt)) r = lerNFCe(paginas);
     else if (/DANFE/.test(txt) && /VALOR TOTAL DA NOTA/i.test(txt)) r = lerNFe(paginas);
     else if (/CEMIG/.test(txt) && /ENERGIA EL[ÉE]TRICA/i.test(txt)) r = lerCemig(paginas);
     else if (/COMPANHIA DE SANEAMENTO DE MG|COPASA/i.test(txt)) r = lerCopasa(paginas);
     else if (/SANTANDER/i.test(txt) && /Detalhamento da Fatura/i.test(txt)) r = lerSantander(paginas);
     else if (/Ita[úu]|ITAU UNIBANCO/i.test(txt) && /Lan[çc]amentos: compras e saques/.test(txt)) r = lerItau(paginas);
     else if (/BANCO INTER|bancointer|inter\.co/i.test(txt) && /Despesas da fatura/.test(txt)) r = lerInter(paginas);
-    else throw new Error("Ainda não sei ler esse modelo de PDF. Hoje o app lê faturas Itaú, Santander e Inter, contas da Cemig e da Copasa, cupom fiscal eletrônico (NFC-e) e nota fiscal eletrônica (NF-e) em PDF.");
+    else throw new Error("Ainda não sei ler esse modelo de PDF. Hoje o app lê faturas Itaú, Santander e Inter, contas da Cemig e da Copasa, cupom fiscal (NFC-e), nota fiscal (NF-e), nota de serviço (NFS-e) e comprovante de Pix em PDF.");
     if (!r.venc) throw new Error("Não encontrei a data de vencimento no PDF.");
     { const [d, m, a] = r.venc.split("/"); r.vencISO = `${a}-${m}-${d}`; }
     if (r.tipo === "conta") { r.chave = `${r.empresa} · ref. ${r.ref}`; return r; }
     if (r.tipo === "cupom") { r.chave = `NFC-e ${r.numero} · ${r.emitente}`; return r; }
     if (r.tipo === "nfe") { r.chave = `NF-e ${r.numero} · ${r.emitente}`; return r; }
+    if (r.tipo === "nfse") { r.chave = `NFS-e ${r.numero} · ${r.emitente}`; return r; }
+    if (r.tipo === "comprovante") { r.chave = `Pix ${r.data} · ${r.emitente}`; return r; }
     r.tipo = "cartao";
     for (const it of r.itens) it.dataCompra = it.ano ? `${it.ano}-${it.data.slice(3)}-${it.data.slice(0, 2)}` : it.data ? dataCompleta(it.data, r.venc) : null;
     marcarEstornos(r.itens);
