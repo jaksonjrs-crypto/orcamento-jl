@@ -699,7 +699,14 @@
     else if (r.tipo !== "comprovante" && slot === "comprovante") { f.arquivo = file; f.compArq = null; slot = "anexo"; }
     if (r.area === "saude" || r.area === "educacao") { f.ir = true; f.irManual = true; }
     const quem = pessoaDoDoc(r); if (quem) f.ir_pessoa = quem;
-    if (st.editando) { if (st.tab === "lancar") render(); toast(slot === "comprovante" ? "Comprovante anexado" : "Nota anexada"); return; }
+    if (st.editando) {
+      // no lançamento existente: o comprovante atualiza o valor pago; a observação "da planilha" vira a do documento
+      if (slot === "comprovante" && isFinite(r.total) && r.total > 0) { f.valor = fmtValorInput(r.total); f.meio = "Pix"; if (r.vencISO) f.data = r.vencISO; }
+      else if (slot === "anexo" && !st.editando.fatura && !f.compArq && !st.editando.comprovante && isFinite(r.total || r.valor)) { f.valor = fmtValorInput(r.total || r.valor); if (r.vencISO) f.data = r.vencISO; }
+      if (!f.obs || /Importado da planilha/.test(f.obs)) f.obs = [r.chave, r.servico].filter(Boolean).join(" · ").slice(0, 140);
+      else if (r.chave && !f.obs.includes(r.chave) && !st.editando.fatura) f.obs = (f.obs + " · " + r.chave).slice(0, 140);
+      if (st.tab === "lancar") render(); toast(slot === "comprovante" ? `Comprovante anexado: ${money(r.total)} pagos` : "Nota anexada"); return;
+    }
     const valor = r.tipo === "conta" ? r.valor : r.total;
     // o valor que conta no orçamento é o que foi pago: o comprovante manda; a nota só preenche se não houver comprovante
     if (isFinite(valor) && valor > 0 && (slot === "comprovante" || !f.compArq)) f.valor = fmtValorInput(valor);
@@ -1323,6 +1330,7 @@
         if (f0.compArq) { f.valor = f0.valor; f.data = f0.data; f.meio = f0.meio; }
         else if (!f.comprovante) { f.valor = f0.valor; f.data = f0.data; }
         if (f0.ir) { f.ir = true; f.ir_pessoa = f0.ir_pessoa; f.ir_pessoaNova = f0.ir_pessoaNova; }
+        if (!f.obs || /Importado da planilha/.test(f.obs)) f.obs = f0.obs;
         render(); toast("Confira e toque em Salvar alterações");
       }
       else if (a === "anexar-comp") { const i = $("#fcomp"); if (i) i.click(); }
