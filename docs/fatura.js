@@ -192,7 +192,8 @@
     }
     const data = (txt.match(/NFC-?e[^\n]*?(\d{2}\/\d{2}\/\d{4})/i) || txt.match(/(\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}/) || [])[1];
     const total = num((txt.match(/Valor a pagar[^\d]{0,12}([\d.]+,\d{2})/i) || txt.match(/Valor total[^\d]{0,12}([\d.]+,\d{2})/i) || [])[1] || "NaN");
-    const numero = (txt.match(/NFC-?e\s*n?[ºo°]?\s*(\d+)/i) || [])[1] || "";
+    const kk = chaveDoQR((txt.match(/(\d{4}\s*){11}/) || [""])[0]);
+    const numero = kk ? kk.numero : ((txt.match(/NFC-?e\s*n?[ºo°.]?\s*(\d+)/i) || [])[1] || "").replace(/^0+/, "");
     const fp = ls.findIndex(l => /FORMA DE PAGAMENTO/i.test(l));
     const forma = fp >= 0 ? ((ls[fp + 1] || "").match(/^(.*?)\s+[\d.]+,\d{2}$/) || [])[1] || "" : "";
     const itens = [];
@@ -424,6 +425,58 @@
     return { grupo: "Outros", item: "Extras diários", origem: "palpite" };
   }
 
-  const api = { extrairPaginas, ler, classificar, chave };
+  // ---------- cupom de papel (foto): texto do OCR + QR code ----------
+  // chave de acesso (44 dígitos) do QR/URL: UF, ano/mês, CNPJ, modelo, série e número
+  function chaveDoQR(qr) {
+    const m = String(qr || "").replace(/\s/g, "").match(/(\d{44})/);
+    if (!m) return null;
+    const k = m[1];
+    return { chave: k, uf: k.slice(0, 2), ano: 2000 + Number(k.slice(2, 4)), mes: Number(k.slice(4, 6)), cnpj: k.slice(6, 20), modelo: k.slice(20, 22),
+      serie: String(Number(k.slice(22, 25))), numero: String(Number(k.slice(25, 34))) };
+  }
+  const CNAE = [
+    [/^47(11|12|21|22|23|24|29)/, "Habitação", "Supermercado"], [/^4771/, "Saúde", "Farmácia"], [/^4772/, "Despesas Pessoais", "Cosméticos"],
+    [/^4731/, "Transporte", "Combustível"], [/^56/, "Lazer", "Restaurantes"], [/^86(30|40|50|60|90)/, "Saúde", "Médicos e terapeutas"],
+    [/^8610/, "Saúde", "Médicos e terapeutas"], [/^85(1|2|3)/, "Educação", "Escola / faculdade"], [/^8599|^8593/, "Educação", "Cursos extracurriculares"],
+    [/^4781|^4782/, "Despesas Pessoais", "Vestuário"], [/^4520|^4530/, "Transporte", "Mecânico / revisão"], [/^4744|^4759|^4753|^4754/, "Outros", "Utilidades domésticas e decoração"],
+    [/^9602/, "Despesas Pessoais", "Cabeleireiro"], [/^9313/, "Despesas Pessoais", "Academia"]
+  ];
+  function classificarCNAE(cnae) {
+    const c = String(cnae || "").replace(/\D/g, "");
+    for (const [re, grupo, item] of CNAE) if (re.test(c)) return { grupo, item, origem: "cnae" };
+    return null;
+  }
+  // lê o que der do texto do OCR; o que faltar a pessoa completa na tela de conferência
+  function lerTextoCupom(texto, qr, hojeISO) {
+    const t = String(texto || "").replace(/\r/g, "");
+    const ls = t.split("\n").map(l => l.trim()).filter(Boolean);
+    const dinheiro = l => (l.match(/\d{1,3}(?:[.\s]\d{3})*[,.]\d{2}(?!\d)/g) || []).map(v => Number(v.replace(/[.\s](?=\d{3}([,.]|$))/g, "").replace(",", ".")));
+    let total = NaN;
+    const rotulos = [/valor\s*a\s*pagar/i, /valor\s*total/i, /total\s*r\$/i, /valor\s*pago/i, /^total\b/i];
+    for (const re of rotulos) {
+      const i = ls.findIndex(l => re.test(l)); if (i < 0) continue;
+      const v = dinheiro(ls[i]).concat(dinheiro(ls[i + 1] || "")); if (v.length) { total = v[0]; break; }
+    }
+    if (!isFinite(total)) { const cont = {}; dinheiro(t).forEach(v => { cont[v] = (cont[v] || 0) + 1; }); const rep = Object.keys(cont).map(Number).filter(v => cont[v] > 1).sort((a, b) => b - a); if (rep.length) total = rep[0]; }
+    const k = chaveDoQR(qr) || chaveDoQR((t.match(/(\d{4}\s*){11}/) || [""])[0]);
+    // datas: ficam as do mês/ano da chave; a mais repetida vence; se uma for hoje, é hoje
+    const datas = (t.match(/\b\d{2}\/\d{2}\/\d{2}(\d{2})?\b/g) || []).map(d => { const [dd, mm, aa] = d.split("/"); return `${aa.length === 2 ? "20" + aa : aa}-${mm}-${dd}`; })
+      .filter(d => { const [a, m, dd] = d.split("-").map(Number); return m >= 1 && m <= 12 && dd >= 1 && dd <= 31 && (!k || (a === k.ano && m === k.mes)); });
+    let data = null;
+    if (hojeISO && datas.includes(hojeISO)) data = hojeISO;
+    else if (datas.length) { const c = {}; datas.forEach(d => { c[d] = (c[d] || 0) + 1; }); data = Object.keys(c).sort((a, b) => c[b] - c[a])[0]; }
+    else if (k && hojeISO && hojeISO.startsWith(`${k.ano}-${String(k.mes).padStart(2, "0")}`)) data = hojeISO;
+    const T = t.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    // OCR troca letras ("Alinentaca", "@linentaca"): aceita parecidos
+    const forma = /(ticket|vale|sodexo|alelo|vr\b).{0,4}.?li[mn]e?n?ta|ali[mn]enta/.test(T) ? "Ticket Alimentação" : /(ticket|vale|sodexo|alelo).{0,4}refei|refei[cç]/.test(T) ? "Ticket Refeição"
+      : /cr[eé]dito/.test(T) ? "Cartão de Crédito" : /d[eé]bito/.test(T) ? "Cartão de Débito" : /\bpix\b/.test(T) ? "Pix" : /dinheiro/.test(T) ? "Dinheiro" : "";
+    const lj = ls.find(l => /\b(ltda|eireli)\b|\bs\/a\b/i.test(l) && !/cnpj|consumidor|\d{5,}/i.test(l));
+    const emitenteOCR = lj ? lj.replace(/[^A-Za-zÀ-ú0-9&.\s-]/g, "").replace(/\s+/g, " ").trim() : "";
+    return { tipo: "cupom", foto: true, emitente: emitenteOCR, data: data ? data.split("-").reverse().join("/") : "", venc: data ? data.split("-").reverse().join("/") : "",
+      vencISO: data || null, total, numero: k ? k.numero : "", serie: k ? k.serie : "", cnpj: k ? k.cnpj : "", chaveAcesso: k ? k.chave : "", forma, itens: [],
+      lidoValor: isFinite(total), lidoData: !!data };
+  }
+
+  const api = { extrairPaginas, ler, classificar, chave, chaveDoQR, lerTextoCupom, classificarCNAE };
   if (typeof module !== "undefined" && module.exports) module.exports = api; else root.Fatura = api;
 })(typeof window !== "undefined" ? window : globalThis);

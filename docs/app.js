@@ -448,6 +448,7 @@
     const regras = (dados && dados.regras) || {};
     let c = window.Fatura.classificar({ desc: r.emitente }, regras);
     if (c.origem === "palpite" && r.itens && r.itens.length) { const ci = window.Fatura.classificar({ desc: r.itens[0].texto || r.itens[0].desc }, regras); if (ci.origem !== "palpite") c = ci; }
+    if (c.origem === "palpite" && r.cnae) { const cc = window.Fatura.classificarCNAE(r.cnae); if (cc) c = cc; }
     if (c.origem === "palpite" && r.area === "saude") c = { grupo: "Saúde", item: "Médicos e terapeutas", origem: "area" };
     if (c.origem === "palpite" && r.area === "educacao") c = { grupo: "Educação", item: "Escola / faculdade", origem: "area" };
     return c;
@@ -597,6 +598,7 @@
         ${temNota ? `<div class="notaok"><span>📎 ${esc(nomeNota)}${f.arquivo ? ' <span class="muted small">(será enviada ao salvar)</span>' : ""}</span>
             <span><button type="button" class="linkbtn" data-act="ver-nota">Ver</button><button type="button" class="linkbtn neg" data-act="tirar-nota">Remover</button></span></div>`
           : `<button type="button" class="btn ghost" data-act="anexar">📎 Anexar nota (foto ou PDF)</button>`}
+        ${!ed && f.arquivo && /^image\//.test(f.arquivo.type || "") ? `<button type="button" class="btn ghost" data-act="ler-foto" style="margin-top:8px">🔍 Ler os valores desta foto</button>` : ""}
         <input type="file" id="fanexo" accept="image/*,application/pdf" hidden>
         <div style="margin-top:8px">${temComp ? `<div class="notaok"><span>🧾 ${esc(nomeComp)}${f.compArq ? ' <span class="muted small">(será enviado ao salvar)</span>' : ""}</span>
             <span><button type="button" class="linkbtn" data-act="ver-comp">Ver</button><button type="button" class="linkbtn neg" data-act="tirar-comp">Remover</button></span></div>`
@@ -770,9 +772,9 @@
       </button>`;
     }
     html += `<div class="btns" style="margin-top:16px">
-      <button class="btn ghost" data-act="importar">📄 Importar PDF (fatura, conta ou cupom)</button>
+      <button class="btn ghost" data-act="importar">📄 Importar PDF ou foto do cupom</button>
       <button class="btn ghost" data-act="copiar">Copiar lançamentos do mês anterior</button></div>
-      <input type="file" id="fpdf" accept="application/pdf,.pdf" hidden>`;
+      <input type="file" id="fpdf" accept="application/pdf,.pdf,image/*" hidden>`;
     return html;
   }
   function abrirCopia() {
@@ -863,6 +865,7 @@
   }
 
   async function importarFatura(file) {
+    if (/^image\//.test(file.type || "") || /\.(jpe?g|png|heic|heif|webp)$/i.test(file.name || "")) return importarFoto(file);
     const aguarde = abrirFolha(`<div class="empty"><span class="spin"></span> Lendo a fatura…</div>`);
     try {
       if (!window.Fatura) throw new Error("O leitor de faturas não carregou. Atualize a página e tente de novo.");
@@ -963,6 +966,94 @@
     });
   }
 
+  // ---------- FOTO DO CUPOM DE PAPEL: leitura no próprio celular (OCR) + QR code ----------
+  const CDN_OCR = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+  const CDN_QR = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+  const scriptsCarregados = {};
+  function carregarScript(src) {
+    return scriptsCarregados[src] || (scriptsCarregados[src] = new Promise((res, rej) => {
+      const el = document.createElement("script"); el.src = src; el.onload = res;
+      el.onerror = () => { delete scriptsCarregados[src]; rej(new Error("Não consegui baixar o leitor de fotos. Verifique a internet e tente de novo.")); };
+      document.head.appendChild(el);
+    }));
+  }
+  async function fotoParaCanvas(file, larguraMax) {
+    const bmp = await createImageBitmap(file);
+    const e = Math.min(1, larguraMax / bmp.width);
+    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * e); c.height = Math.round(bmp.height * e);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    return c;
+  }
+  // cinza + contraste + preto e branco (limiar de Otsu): é o que mais ajuda a ler cupom térmico
+  function pretoEBranco(c) {
+    const ctx = c.getContext("2d"); const img = ctx.getImageData(0, 0, c.width, c.height); const d = img.data;
+    const hist = new Array(256).fill(0); const g = new Uint8Array(d.length / 4);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 | 0; g[j] = v; hist[v]++; }
+    const n = g.length; let acc = 0, lo = 0, hi = 255;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > n * 0.02) { lo = v; break; } }
+    acc = 0; for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > n * 0.02) { hi = v; break; } }
+    const esc = 255 / Math.max(1, hi - lo); const h2 = new Array(256).fill(0);
+    for (let j = 0; j < n; j++) { const v = Math.max(0, Math.min(255, (g[j] - lo) * esc | 0)); g[j] = v; h2[v]++; }
+    let soma = 0; for (let v = 0; v < 256; v++) soma += v * h2[v];
+    let sB = 0, wB = 0, melhor = 0, limiar = 128;
+    for (let v = 0; v < 256; v++) { wB += h2[v]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += v * h2[v]; const mB = sB / wB, mF = (soma - sB) / wF; const ent = wB * wF * (mB - mF) * (mB - mF); if (ent > melhor) { melhor = ent; limiar = v; } }
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = g[j] > limiar ? 255 : 0; d[i] = d[i + 1] = d[i + 2] = v; }
+    ctx.putImageData(img, 0, 0); return c;
+  }
+  async function lerQR(file) {
+    try {
+      if ("BarcodeDetector" in window) {
+        const det = new window.BarcodeDetector({ formats: ["qr_code"] });
+        const r = await det.detect(await createImageBitmap(file)); if (r && r.length) return r[0].rawValue;
+      }
+    } catch (e) { /* sem leitor nativo */ }
+    try {
+      await carregarScript(CDN_QR);
+      for (const w of [1200, 1800, 800]) {
+        const c = await fotoParaCanvas(file, w); const im = c.getContext("2d").getImageData(0, 0, c.width, c.height);
+        const q = window.jsQR(im.data, c.width, c.height); if (q && q.data) return q.data;
+      }
+    } catch (e) { /* segue sem QR */ }
+    return null;
+  }
+  async function dadosCNPJ(cnpj) {
+    try { const r = await fetch("https://brasilapi.com.br/api/cnpj/v1/" + cnpj); return r.ok ? await r.json() : null; } catch (e) { return null; }
+  }
+  const tituloCaso = s => String(s || "").toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase()).replace(/\b(Ltda|S\/a|S\.a\.?|Me|Eireli|Epp)\b\.?/gi, "").replace(/\s+/g, " ").trim();
+  async function importarFoto(file) {
+    const bg = abrirFolha(`<h3>🧾 Lendo a foto do cupom</h3><div class="empty" id="fp"><span class="spin"></span> Procurando o QR code…</div>
+      <p class="muted small">A leitura é feita aqui no celular. Na primeira vez ele baixa o leitor (alguns MB).</p>`);
+    const prog = t => { const el = $("#fp", bg); if (el) el.innerHTML = `<span class="spin"></span> ${esc(t)}`; };
+    let worker = null;
+    try {
+      const qr = await lerQR(file);
+      prog("Preparando a foto…");
+      await carregarScript(CDN_OCR);
+      const canvas = pretoEBranco(await fotoParaCanvas(file, 1600));
+      worker = await window.Tesseract.createWorker("por", 1, { logger: m => {
+        if (m.status === "recognizing text") prog(`Lendo a foto… ${Math.round((m.progress || 0) * 100)}%`);
+        else if (/load|initializ/i.test(m.status || "")) prog("Baixando o leitor (só na primeira vez)…");
+      } });
+      await worker.setParameters({ tessedit_pageseg_mode: "6" });
+      const { data } = await worker.recognize(canvas);
+      const r = window.Fatura.lerTextoCupom(data.text, qr, hojeISO());
+      if (r.cnpj) {
+        prog("Buscando o nome da loja…");
+        const j = await dadosCNPJ(r.cnpj);
+        if (j) { r.emitente = tituloCaso(j.nome_fantasia || j.razao_social) || r.emitente; r.cnae = String(j.cnae_fiscal || ""); }
+      }
+      r.emitente = tituloCaso(r.emitente) || "Cupom fiscal";
+      r.chave = r.numero ? `NFC-e ${r.numero} · ${r.emitente}` : `Cupom ${r.data || ""} · ${r.emitente}`;
+      bg.remove();
+      abrirCupom(r, file);
+    } catch (e) {
+      bg.remove();
+      abrirFolha(`<h3>Não consegui ler a foto</h3><p class="muted">${esc(e.message || String(e))}</p>
+        <p class="muted small">Dica: foto de frente, com boa luz e o cupom inteiro. Se preferir, lance pelo botão Lançar e anexe a foto como nota.</p>
+        <div class="btns"><button class="btn" data-x="fechar">Ok</button></div>`, true);
+    } finally { if (worker) worker.terminate().catch(() => {}); }
+  }
+
   // conta de luz/água: vira um lançamento só, substituindo o do mês se já existir
   function abrirConta(r, file) {
     const doMesConta = iso => { const [y, m] = iso.split("-").map(Number); return doMes(y, m); };
@@ -1017,7 +1108,7 @@
     const slot = r.tipo === "comprovante" ? "comprovante" : "anexo";
     const ROTULO = { cupom: "Cupom fiscal", nfe: "Nota fiscal", nfse: "Nota fiscal de serviço", comprovante: "Comprovante de Pix" };
     const c = classificarDoc(r);
-    const f = r.forma.toLowerCase();
+    const f = (r.forma || "").toLowerCase();
     const meioPadrao = /cr[eé]dito/.test(f) ? "Cartão de Crédito" : /d[eé]bito/.test(f) ? "Cartão de Débito" : /dinheiro/.test(f) ? "Dinheiro" : /pix/.test(f) ? "Pix"
       : /alimenta/.test(f) ? "Ticket Alimentação" : /refei/.test(f) ? "Ticket Refeição" : "Outro";
     const opcoesPago = MEIOS.filter(m => !["Ticket Restaurante", "Sodexo"].includes(m)).concat(["Ticket Alimentação", "Ticket Refeição", "Ticket Combustível"]);
@@ -1026,9 +1117,10 @@
     const irPadrao = irSugerido("despesa", c.grupo, c.item) || r.area === "saude" || r.area === "educacao" || juntar.some(l => l.ir);
     const quem = pessoaDoDoc(r) || (juntar.find(l => l.ir_pessoa) || {}).ir_pessoa || pessoaPadrao();
     const bg = abrirFolha(`
-      <h3>${slot === "comprovante" ? "🧾" : "📄"} ${esc(r.emitente)}</h3>
+      <h3>${slot === "comprovante" || r.tipo === "cupom" ? "🧾" : "📄"} ${esc(r.emitente)}</h3>
       <p class="muted small">${ROTULO[r.tipo] || "Documento"} ${esc(r.numero ? "nº " + r.numero : "")} · ${esc(r.data)}${r.forma ? " · pago com: " + esc(r.forma) : ""}${r.tomador ? " · em nome de " + esc(r.tomador) : ""}</p>
       ${r.servico ? `<p class="small" style="margin:-4px 0 8px">${esc(r.servico)}</p>` : ""}
+      ${r.foto ? `<div class="${r.lidoValor && r.lidoData ? "okbox" : "alert"}" style="margin-bottom:10px">${r.lidoValor && r.lidoData ? "Lido da foto: confira o valor, a data e a forma de pagamento antes de salvar." : `Não consegui ler ${!r.lidoValor && !r.lidoData ? "o valor nem a data" : !r.lidoValor ? "o valor" : "a data"} com segurança: preencha abaixo.`}</div>` : ""}
       ${r.tipo === "comprovante" && r.original && Math.abs(r.original - r.total) > 0.005 ? `<p class="muted small">Valor original ${money(r.original)}; pago ${money(r.total)} (com juros/multa).</p>` : ""}
       ${juntar.length ? `<h4>Essa despesa já está lançada?</h4>
         ${juntar.map((l, i) => `<label class="small linha"><input type="radio" name="ujunta" value="${l.id}" ${i === 0 ? "checked" : ""}> Juntar a “${esc(l.item)}” de ${l.data.split("-").reverse().join("/")} (${money(l.valor)})${l.anexo ? " · já tem nota" : ""}${l.comprovante ? " · já tem comprovante" : ""}</label>`).join("")}
@@ -1036,14 +1128,14 @@
         <p class="muted small" id="ujuntainfo"></p>` : ""}
       ${r.tipo === "nfe" ? `<p class="muted small">Compras online costumam ser pagas no cartão de crédito. Se foi o caso, ela já vem na fatura: não precisa lançar a nota.</p>` : ""}
       ${r.itens.length ? `<div class="small" style="margin-bottom:10px">${r.itens.map(i => `<div class="kv"><span>${esc(i.desc)}</span><span class="num">${money(i.valor)}</span></div>`).join("")}</div>` : ""}
-      <div class="field"><label>${slot === "comprovante" ? "Valor pago" : "Valor total"}</label><input id="uv" class="money num" inputmode="decimal" value="${fmtValorInput(r.total)}"></div>
+      <div class="field"><label>${slot === "comprovante" ? "Valor pago" : "Valor total"}</label><input id="uv" class="money num" inputmode="decimal" placeholder="0,00" value="${isFinite(r.total) ? fmtValorInput(r.total) : ""}"></div>
       <div class="field"><label>Categoria</label><select id="uc">${opcoesCategoria(juntar.length ? juntar[0].grupo + "|" + juntar[0].item : c.grupo + "|" + c.item)}</select></div>
       <div class="row2">
-        <div class="field"><label>Data</label><input id="ud" type="date" value="${r.vencISO}"></div>
+        <div class="field"><label>Data</label><input id="ud" type="date" value="${r.vencISO || ""}"></div>
         <div class="field"><label>Pago com</label><select id="um">${opcoesPago.map(x => `<option ${x === meioPadrao ? "selected" : ""}>${x}</option>`).join("")}</select></div>
       </div>
       <div id="uaviso"></div>
-      <label class="linha"><input type="checkbox" id="uguardar" checked> ${slot === "comprovante" ? "🧾 Guardar este comprovante" : "📎 Guardar este PDF"} junto do lançamento</label>
+      <label class="linha"><input type="checkbox" id="uguardar" checked> ${slot === "comprovante" ? "🧾 Guardar este comprovante" : r.foto ? "📎 Guardar esta foto" : "📎 Guardar este PDF"} junto do lançamento</label>
       <div id="uirbox">${camposIR("u", "despesa", irPadrao, quem)}</div>
       ${ja.length ? `<div class="alert">Esse documento já foi lançado. Ao salvar, o lançamento anterior será substituído.</div>` : ""}
       <div class="btns two" style="margin-top:12px"><button class="btn ghost" data-x="fechar">Cancelar</button><button class="btn" data-x="ok">Salvar</button></div>`, true);
@@ -1070,6 +1162,7 @@
       const pessoa = $("#uirp", bg) ? $("#uirp", bg).value : pessoaPadrao();
       $("#uirbox", bg).innerHTML = ticket ? "" : camposIR("u", "despesa", marcado, pessoa, ($("#uirn", bg) || {}).value);
     };
+    if (/^Ticket/.test($("#um", bg).value)) redesenharIR();
     bg.addEventListener("change", ev => {
       if (ev.target.id === "uir") { irManual = true; redesenharIR(); }
       else if (ev.target.id === "uirp" || ev.target.id === "um" || (ev.target.id === "uc" && !irManual)) redesenharIR();
@@ -1077,7 +1170,8 @@
     bg.addEventListener("click", async ev => {
       const x = ev.target.closest('[data-x="ok"]'); if (!x) return;
       const v = parseValor($("#uv", bg).value); const data = $("#ud", bg).value; const pago = $("#um", bg).value;
-      if (!(v > 0)) { toast("Valor inválido"); return; }
+      if (!(v > 0)) { toast("Informe o valor"); $("#uv", bg).focus(); return; }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) { toast("Informe a data"); return; }
       const [grupo, item] = $("#uc", bg).value.split("|");
       const obs = [r.chave, r.itens.slice(0, 3).map(i => i.desc).join(", ") + (r.itens.length > 3 ? "…" : "")].filter(Boolean).join(" · ");
       let reg;
@@ -1323,6 +1417,7 @@
       else if (a === "importar") { const i = $("#fpdf"); if (i) i.click(); }
       else if (a === "excluir-fatura") excluirFatura(b.dataset.key);
       else if (a === "anexar") { const i = $("#fanexo"); if (i) i.click(); }
+      else if (a === "ler-foto") { const f = st.form; if (f && f.arquivo) importarFoto(f.arquivo); }
       else if (a === "juntar-existente") {
         lerForm(); const f0 = st.form; const id = f0.sugestaoJuntar; if (!id) return;
         abrirEdicao(id);
