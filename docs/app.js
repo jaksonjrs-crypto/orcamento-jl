@@ -529,7 +529,8 @@
     if (!f.item) f.item = itens[0] || OUTRO;
     if (f.ir === undefined) f.ir = irSugerido(f.tipo, f.grupo, f.item);
     const temNota = f.arquivo || (f.anexo && !f.removerAnexo);
-    const nomeNota = f.arquivo ? f.arquivo.name || "foto" : f.anexo_nome || (f.anexo || "").split("/").pop();
+    const nomeNota0 = f.arquivo ? f.arquivo.name || "foto" : f.anexo_nome || (f.anexo || "").split("/").pop();
+    const nomeNota = nomeNota0.length > 34 ? nomeNota0.slice(0, 18) + "…" + nomeNota0.slice(-12) : nomeNota0;
     const meios = MEIOS.slice(); if (f.meio && !meios.includes(f.meio)) meios.push(f.meio);
     const opt = (arr, v) => arr.map(x => `<option ${x === v ? "selected" : ""}>${esc(x)}</option>`).join("");
     const ed = st.editando;
@@ -582,7 +583,11 @@
     $("#fi").addEventListener("change", () => { lerForm(); reSugerir(); render(); const n = $("#fin"); if (n) n.focus(); });
     const fir = $("#fir"); if (fir) fir.addEventListener("change", () => { lerForm(); st.form.irManual = true; render(); });
     const firp = $("#firp"); if (firp) firp.addEventListener("change", () => { lerForm(); render(); const n = $("#firn"); if (n) n.focus(); });
-    const fan = $("#fanexo"); if (fan) fan.addEventListener("change", () => { const a = fan.files[0]; fan.value = ""; if (!a) return; lerForm(); st.form.arquivo = a; st.form.removerAnexo = false; render(); });
+    const fan = $("#fanexo"); if (fan) fan.addEventListener("change", () => {
+      const a = fan.files[0]; fan.value = ""; if (!a) return;
+      lerForm(); st.form.arquivo = a; st.form.removerAnexo = false; render();
+      if (/pdf/i.test(a.type) || /\.pdf$/i.test(a.name || "")) preencherDoPdf(a);
+    });
     form.addEventListener("submit", async ev => {
       ev.preventDefault(); lerForm();
       const f = st.form; const v = parseValor(f.valor);
@@ -620,6 +625,31 @@
       } catch (e) { $("#ferr").textContent = "Não foi possível salvar: " + e.message; b.disabled = false; b.textContent = "Tentar de novo"; }
     });
     if (!st.editando) setTimeout(() => { const v = $("#fv"); if (v && !v.value && window.matchMedia("(pointer:fine)").matches) v.focus(); }, 50);
+  }
+  // PDF anexado no Lançar: se for um modelo conhecido, preenche valor, data e categoria
+  async function preencherDoPdf(file) {
+    let r;
+    try {
+      const pdfjs = await carregarPdfjs();
+      r = window.Fatura.ler(await window.Fatura.extrairPaginas(pdfjs, new Uint8Array(await file.arrayBuffer()), pedirSenhaFactory()));
+    } catch (e) { toast("Não reconheci esse modelo de nota: ela será só guardada. Preencha o valor."); return; }
+    const f = st.form; if (!f || f.arquivo !== file) return;
+    if (r.tipo === "cartao") { toast("Isso é uma fatura de cartão: use Lista → Importar PDF"); return; }
+    const valor = r.tipo === "conta" ? r.valor : r.total;
+    let g = r.grupo, i = r.item;
+    if (r.tipo !== "conta") {
+      const regras = (dados && dados.regras) || {};
+      let c = window.Fatura.classificar({ desc: r.emitente }, regras);
+      if (c.origem === "palpite" && r.itens && r.itens.length) { const ci = window.Fatura.classificar({ desc: r.itens[0].texto || r.itens[0].desc }, regras); if (ci.origem !== "palpite") c = ci; }
+      g = c.grupo; i = c.item;
+    }
+    if (isFinite(valor) && valor > 0) f.valor = fmtValorInput(valor);
+    if (r.vencISO) f.data = r.vencISO;
+    if (f.tipo !== "despesa") { f.tipo = "despesa"; }
+    f.grupo = g; f.item = i; if (!f.irManual) f.ir = undefined;
+    if (!f.obs) f.obs = [r.chave, r.detalhe].filter(Boolean).join(" · ").slice(0, 140);
+    if (st.tab === "lancar") render();
+    toast("Li a nota: confira valor, data e categoria");
   }
   async function excluirAtual() {
     if (!st.editando || !confirm("Excluir este lançamento? Essa ação não pode ser desfeita.")) return;
