@@ -146,9 +146,11 @@
     }
     let metas = [];
     try { metas = await api("metas?select=*"); } catch (e) { metas = []; }
+    let pessoas = [];
+    try { pessoas = await api("pessoas?select=*&order=ordem.asc,nome.asc"); } catch (e) { pessoas = []; }
     const regras = {};
     try { (await api("regras?select=*")).forEach(r => { regras[r.chave] = { grupo: r.grupo, item: r.item }; }); } catch (e) { /* tabela ainda não criada */ }
-    return { lanc: todos.map(x => Object.assign(x, { valor: Number(x.valor) })), metas, regras };
+    return { lanc: todos.map(x => Object.assign(x, { valor: Number(x.valor) })), metas, regras, pessoas };
   }
 
   // ===================== ESTADO =====================
@@ -351,10 +353,13 @@
   };
   const irSugerido = (tipo, grupo, item) => tipo === "despesa" && (IR_SUGERIDO[grupo] || []).includes(item);
   function pessoasIR() {
-    const s = PESSOAS_BASE.slice();
+    const s = (dados && dados.pessoas && dados.pessoas.length ? dados.pessoas.map(p => p.nome) : []);
+    PESSOAS_BASE.forEach(p => { if (!s.includes(p)) s.push(p); });
     if (dados) dados.lanc.forEach(l => { if (l.ir_pessoa && !s.includes(l.ir_pessoa)) s.push(l.ir_pessoa); });
     return s;
   }
+  // nome completo para o contador (fica só no banco, não no código)
+  const nomeCompleto = p => { const x = dados && dados.pessoas && dados.pessoas.find(q => q.nome === p); return (x && x.nome_completo) || p; };
   function pessoaPadrao() { const n = semAcento(nomeUsuario()); return n.startsWith("JAK") ? "Jakson" : "Lílian"; }
   const slugNota = s => semAcento(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "nota";
   const caminhoUrl = p => p.split("/").map(encodeURIComponent).join("/");
@@ -471,11 +476,11 @@
           try { raiz.folder(pasta).file(nomeArq, await baixarNota(l.anexo)); arquivo = `${pasta}/${nomeArq}`; }
           catch (e) { falhas.push(l); arquivo = "(não baixou)"; }
         }
-        L.push([l.data.split("-").reverse().join("/"), l.ir ? "Sim" : "Não", l.ir_pessoa || "", l.grupo, l.item, l.valor, l.meio, l.obs, arquivo || (l.ir ? "SEM NOTA" : "")]);
+        L.push([l.data.split("-").reverse().join("/"), l.ir ? "Sim" : "Não", l.ir_pessoa ? nomeCompleto(l.ir_pessoa) : "", l.grupo, l.item, l.valor, l.meio, l.obs, arquivo || (l.ir ? "SEM NOTA" : "")]);
       }
       L.push([]); L.push(["TOTAL DEDUTÍVEL POR PESSOA"]);
       const porP = {}; doAno.filter(l => l.ir).forEach(l => { porP[l.ir_pessoa || "Sem nome"] = (porP[l.ir_pessoa || "Sem nome"] || 0) + l.valor; });
-      Object.entries(porP).forEach(([p, v]) => L.push([p, "", "", "", "", v]));
+      Object.entries(porP).forEach(([p, v]) => L.push([nomeCompleto(p), "", "", "", "", v]));
       raiz.file(`Resumo IR ${y}.csv`, csvLinhas(L));
       $("#zp", bg).innerHTML = `<span class="spin"></span> Gerando o arquivo .zip…`;
       const blob = await zip.generateAsync({ type: "blob" });

@@ -26,6 +26,18 @@ create policy "familia_notas_enviar" on storage.objects for insert to authentica
 create policy "familia_notas_mudar"  on storage.objects for update to authenticated using (bucket_id = 'notas') with check (bucket_id = 'notas');
 create policy "familia_notas_apagar" on storage.objects for delete to authenticated using (bucket_id = 'notas');
 
+-- 4) pessoas da família para marcar as despesas do IR (os nomes são cadastrados direto no banco, não neste arquivo)
+create table if not exists public.pessoas (
+  nome           text primary key,   -- como aparece no app (ex.: primeiro nome)
+  nome_completo  text,               -- como vai para o contador
+  ordem          int not null default 0
+);
+alter table public.pessoas enable row level security;
+drop policy if exists "familia_pessoas" on public.pessoas;
+create policy "familia_pessoas" on public.pessoas for all to authenticated using (true) with check (true);
+revoke all on public.pessoas from anon;
+grant select, insert, update, delete on public.pessoas to authenticated;
+
 select 'ok' as resultado,
   (select public from storage.buckets where id = 'notas') as pasta_publica,
   (select count(*) from information_schema.columns where table_name = 'lancamentos' and column_name in ('anexo','anexo_nome','ir','ir_pessoa')) as colunas_novas;
